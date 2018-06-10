@@ -1,7 +1,23 @@
 #ifdef _WIN32
-#   define _WIN32_WINNT 0x0601
-#elif defined(__APPLE__)
-#   define _XOPEN_SOURCE
+#   ifdef _WIN32_WINNT
+#       if _WIN32_WINNT < 0x0601
+#           error 需要 Windows 7 以上系统支持
+#       endif
+#   else
+#       define _WIN32_WINNT 0x0601
+#   endif
+#   ifdef WIN32_LEAD_AND_MEAN
+#       include <Windows.h>
+#   else
+#       define WIN32_LEAD_AND_MEAN 1
+#       include <Windows.h>
+#       undef WIN32_LEAD_AND_MEAN
+#   endif
+#else
+#   if defined(__APPLE__)
+#       define _XOPEN_SOURCE
+#   endif
+#   include <ucontext.h>
 #endif
 
 #include <functional>
@@ -11,24 +27,31 @@
 #include <array>
 #include <memory>
 #include <algorithm>
-#ifdef _WIN32
-#   ifdef WIN32_LEAD_AND_MEAN
-#       include <Windows.h>
-#   else
-#       define WIN32_LEAD_AND_MEAN 1
-#       include <Windows.h>
-#       undef WIN32_LEAD_AND_MEAN
-#   endif
-#else
-#   include <ucontext.h>
-#endif
 
 namespace FiberSpace {
+    enum class FiberStatus {
+        unstarted = -1,
+        running = 1,
+        suspended = 2,
+        closed = 0,
+    };
+
+
+    /** \brief 主纤程类析构异常类
+     *
+     * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
+     */
+    struct FiberReturn {
+        template <typename YieldValueType>
+        friend class Fiber;
+
+    private:
+        FiberReturn() = default;
+    };
+
     /** \brief 主纤程类
      *
-     * 目前可以嵌套开纤程，但最好只在每个纤程中新开一个纤程
-     *
-     * \warning 无线程安全
+     * \warning 线程安全（？）
      * \param YieldValueType 子纤程返回类型
      */
     template <typename YieldValueType = void>
@@ -43,7 +66,7 @@ namespace FiberSpace {
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
         /// \brief 子纤程是否结束
-        bool flagFinish = false;
+        FiberStatus status = FiberStatus::unstarted;
         /// \brief 真子纤程入口，第一个参数传入纤程对象的引用
         FuncType func;
         /// \brief 纤程信息
@@ -79,16 +102,22 @@ namespace FiberSpace {
             this->ctx_fnew.uc_link = &this->ctx_main;
             ::makecontext(&this->ctx_fnew, (void(*)())&fEntry, 1, this);
 #endif
+
+//        template<typename Fn, typename Args...>
+//        Fiber(Fn f,)
+
         }
         /** \brief 析构函数
          *
          * 删除子纤程，并将主纤程转回线程
          *
-         * \warning 为确保子纤程函数内所有对象都已正确析构，主类析构时子纤程必须已经结束 (return)
+         * \warning 主类析构时如子纤程尚未结束（return），则会在子纤程中抛出 FiberReturn 来确保子纤程函数内所有对象都被正确析构
          */
         ~Fiber() noexcept {
-            if (!isFinished())
-                std::terminate();
+            if (!isFinished()) {
+                return_();
+            }
+
 #ifdef _WIN32
             ::DeleteFiber(this->pNewFiber);
             if (this->isFormerAThread) {
@@ -99,7 +128,7 @@ namespace FiberSpace {
 
         /** \brief 调用子纤程
          *
-         * 程序流程转入子线程
+         * 程序流程转入子纤程
          *
          * \warning 子纤程必须尚未结束
          * \return 返回子纤程是否尚未结束
@@ -119,6 +148,32 @@ namespace FiberSpace {
             return !isFinished();
         }
 
+        /** \brief 向子纤程内部抛出异常
+         *
+         * 程序流程转入子纤程，并在子纤程内部抛出异常
+         *
+         * \param eptr 需抛出异常的指针（可以通过 std::make_exception_ptr 获取）
+         * \warning 子纤程必须尚未结束
+         * \return 返回子纤程是否尚未结束
+         */
+        bool throw_(std::exception_ptr&& eptr) {
+            assert(!isFinished());
+            this->eptr = std::exchange(eptr, nullptr);
+            return next();
+        }
+
+        /** \brief 强制退出子纤程
+         *
+         * 向子纤程内部抛出 FiberReturn 异常，以强制退出子纤程，并确保子纤程函数中所有对象都正确析构
+         *
+         * \warning 子纤程必须尚未结束
+         */
+        void return_() {
+            assert(!isFinished());
+            throw_(std::make_exception_ptr(FiberReturn()));
+            assert(isFinished() && "请勿吃掉 FiberReturn 异常！！！");
+        }
+
         /** \brief 获得子纤程返回的值
          * \return 子纤程返回的值。如果子纤程没有启动，则返回默认构造值
          */
@@ -130,7 +185,7 @@ namespace FiberSpace {
         * \return 子纤程已经结束(return)返回true，否则false
         */
         bool isFinished() const noexcept {
-            return this->flagFinish;
+            return this->status == FiberStatus::closed;
         }
 
         /** \brief 转回主纤程并输出值
@@ -141,6 +196,7 @@ namespace FiberSpace {
          */
         void yield(YieldValueType value) {
             assert(!isFinished());
+            this->status = FiberStatus::suspended;
             this->yieldedValue = std::move(value);
 #ifdef _WIN32
             assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
@@ -148,6 +204,11 @@ namespace FiberSpace {
 #else
             ::swapcontext(&this->ctx_fnew, &this->ctx_main);
 #endif
+            this->status = FiberStatus::running;
+
+            if (this->eptr) {
+                std::rethrow_exception(std::exchange(this->eptr, nullptr));
+            }
         }
 
         /** \brief 输出子纤程的所有值
@@ -172,14 +233,17 @@ namespace FiberSpace {
 #else
         static void fEntry(Fiber *fiber) {
 #endif
-
-            fiber->flagFinish = false;
-            try {
-                fiber->func(*fiber);
-            } catch (...) {
-                fiber->eptr = std::current_exception();
+            if (!fiber->eptr) {
+                fiber->status = FiberStatus::running;
+                try {
+                    fiber->func(*fiber);
+                } catch (FiberReturn &) {
+                    // 主 Fiber 对象正在析构
+                } catch (...) {
+                    fiber->eptr = std::current_exception();
+                }
             }
-            fiber->flagFinish = true;
+            fiber->status = FiberStatus::closed;
 #ifdef _WIN32
             ::SwitchToFiber(fiber->pMainFiber);
 #endif
@@ -251,10 +315,26 @@ namespace FiberSpace {
 using namespace std;
 using FiberSpace::Fiber;
 
+bool destructedFlag = false;
+
+struct TestDestruct {
+    ~TestDestruct() {
+        destructedFlag = true;
+    }
+};
+
+void foo(Fiber<bool>& fiber, int arg) {
+    TestDestruct test;
+    for (int i = 1; i < 5; i++) {
+        printf("goroutine :%d\n", arg+i);
+        fiber.yield(false);
+    }
+}
+
 void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr, int length) {
     if (length) {
         for (auto i = 0; i < length; ++i) {
-            array<int, 4> newArr;
+            array<int, 4> newArr(arr);
             std::copy_n(arr.begin(), i, newArr.begin());
             std::copy_n(arr.begin() + i + 1, arr.size() - i - 1, newArr.begin() + i);
             newArr.back() = arr[i];
@@ -266,10 +346,16 @@ void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr, int length) {
 }
 
 int main() {
+    {
+        Fiber<bool> arg1Fiber(bind(foo, placeholders::_1, 0));
+        arg1Fiber.next();
+    }
+    assert(destructedFlag);
+
     Fiber<array<int, 4>> fiber(
         bind(permutation, placeholders::_1, array<int, 4> {1, 2, 3, 4}, 4)
     );
-    for (auto && result : fiber) {
+    for (auto&& result : fiber) {
         copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
         cout << endl;
     }
