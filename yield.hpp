@@ -157,7 +157,7 @@ namespace FiberSpace {
                 this->pMainFiber = ::GetCurrentFiber();
             }
             // default stack size
-            this->pNewFiber = ::CreateFiberEx(0, 0, FIBER_FLAG_FLOAT_SWITCH, (void(*)(void *))&fEntry, this);
+            this->pNewFiber = ::CreateFiberEx(0, 0, FIBER_FLAG_FLOAT_SWITCH, (LPFIBER_START_ROUTINE)&fEntry, this);
 #elif USE_UCONTEXT
             ::getcontext(&this->ctx_fnew);
             this->ctx_fnew.uc_stack.ss_sp = this->fnew_stack.get();

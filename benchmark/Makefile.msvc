@@ -2,13 +2,13 @@ benchmark: pingpang createalot
 	echo FINISHED
 
 pingpang:
-	$(CXX) pingpang.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHs /Fepingpang_fcontext /I..\..\boost_1_67_0 /link /LIBPATH:..\..\boost_1_67_0/stage/lib
+	$(CXX) pingpang.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHs /Fepingpang_fcontext -DUSE_FCONTEXT=1 /I..\..\boost_1_67_0 /link /LIBPATH:..\..\boost_1_67_0/stage/lib
 	$(CXX) pingpang.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHsc /Fepingpang_native -DUSE_FCONTEXT=0
 	pingpang_fcontext
 	pingpang_native
 
 createalot:
-	$(CXX) createalot.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHs /Fecreatealot_fcontext /I..\..\boost_1_67_0 /link /LIBPATH:..\..\boost_1_67_0/stage/lib
+	$(CXX) createalot.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHs /Fecreatealot_fcontext -DUSE_FCONTEXT=1 /I..\..\boost_1_67_0 /link /LIBPATH:..\..\boost_1_67_0/stage/lib
 	$(CXX) createalot.cpp /nologo /utf-8 /std:c++17 /DNDEBUG=1 /O2 /favor:AMD64 /Oi /MD /Gy /EHsc /Fecreatealot_native -DUSE_FCONTEXT=0
 	createalot_fcontext
 	createalot_native
