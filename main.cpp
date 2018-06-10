@@ -1,29 +1,45 @@
-#ifdef _WIN32
-#   ifdef _WIN32_WINNT
-#       if _WIN32_WINNT < 0x0601
-#           error 需要 Windows 7 以上系统支持
-#       endif
+#ifndef USE_FCONTEXT
+#   if __has_include(<boost/context/detail/fcontext.hpp>)
+#       define USE_FCONTEXT 1
+#   endif
+#endif
+#if USE_FCONTEXT
+#   include <boost/assert.hpp>
+#   include <boost/context/detail/fcontext.hpp>
+#   ifdef NDEBUG
+#       include <boost/context/fixedsize_stack.hpp>
 #   else
-#       define _WIN32_WINNT 0x0601
+#       include <boost/context/protected_fixedsize_stack.hpp>
 #   endif
-#   ifdef WIN32_LEAD_AND_MEAN
-#       include <Windows.h>
-#   else
-#       define WIN32_LEAD_AND_MEAN 1
-#       include <Windows.h>
-#       undef WIN32_LEAD_AND_MEAN
-#   endif
-#elif !defined(__ANDROID__) && __has_include(<ucontext.h>)
-#   if defined(__APPLE__)
-#       define _XOPEN_SOURCE
-#   endif
-#   include <ucontext.h>
-#   define USE_UCONTEXT 1
 #else
-#   include <setjmp.h>
-#   include <signal.h>
-#   include <unistd.h>
-#   define USE_SJLJ 1
+#   ifdef _WIN32
+#       define USE_WINFIB 1
+#       ifdef _WIN32_WINNT
+#           if _WIN32_WINNT < 0x0601
+#               error 需要 Windows 7 以上系统支持
+#           endif
+#       else
+#           define _WIN32_WINNT 0x0601
+#       endif
+#       ifdef WIN32_LEAD_AND_MEAN
+#           include <Windows.h>
+#       else
+#           define WIN32_LEAD_AND_MEAN 1
+#           include <Windows.h>
+#           undef WIN32_LEAD_AND_MEAN
+#       endif
+#   elif !defined(__ANDROID__) && __has_include(<ucontext.h>)
+#       if defined(__APPLE__)
+#           define _XOPEN_SOURCE
+#       endif
+#       include <ucontext.h>
+#       define USE_UCONTEXT 1
+#   else
+#       include <setjmp.h>
+#       include <signal.h>
+#       include <unistd.h>
+#       define USE_SJLJ 1
+#   endif
 #endif
 
 #include <functional>
@@ -64,6 +80,11 @@ namespace FiberSpace {
         FiberReturn() = default;
     };
 
+
+#if USE_FCONTEXT
+    namespace fctx = boost::context;
+#endif
+
     /** \brief 主纤程类
      *
      * \warning 线程安全（？）
@@ -86,7 +107,15 @@ namespace FiberSpace {
         FuncType func;
 
         /// \brief 纤程信息
-#ifdef _WIN32
+#if USE_FCONTEXT
+        fctx::detail::fcontext_t ctx_main, ctx_fnew;
+#   ifdef NDEBUG
+        fctx::fixedsize_stack stack_allocator;
+#   else
+        fctx::protected_fixedsize_stack stack_allocator;
+#endif
+        fctx::stack_context fnew_stack;
+#elif USE_WINFIB
         PVOID pMainFiber, pNewFiber;
         bool isFormerAThread;
 #elif USE_UCONTEXT
@@ -107,7 +136,10 @@ namespace FiberSpace {
          * \param f 子纤程入口
          */
         explicit Fiber(FuncType f) : func(std::move(f)) {
-#ifdef _WIN32
+#if USE_FCONTEXT
+            this->fnew_stack = this->stack_allocator.allocate();
+            this->ctx_fnew = fctx::detail::make_fcontext(this->fnew_stack.sp, this->fnew_stack.size, fEntry);
+#elif USE_WINFIB
             this->isFormerAThread = !IsThreadAFiber();
             if (this->isFormerAThread) {
                 this->pMainFiber = ::ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
@@ -167,7 +199,9 @@ namespace FiberSpace {
                 return_();
             }
 
-#ifdef _WIN32
+#if USE_FCONTEXT
+            this->stack_allocator.deallocate(this->fnew_stack);
+#elif USE_WINFIB
             ::DeleteFiber(this->pNewFiber);
             if (this->isFormerAThread) {
                 ::ConvertFiberToThread();
@@ -184,7 +218,9 @@ namespace FiberSpace {
          */
         bool next() {
             assert(!isFinished());
-#ifdef _WIN32
+#if USE_FCONTEXT
+            this->ctx_fnew = fctx::detail::jump_fcontext(this->ctx_fnew, this).fctx;
+#elif USE_WINFIB
             assert(GetCurrentFiber() != this->pNewFiber && "如果你想递归自己，请创建一个新纤程");
             ::SwitchToFiber(this->pNewFiber);
 #elif USE_UCONTEXT
@@ -251,7 +287,9 @@ namespace FiberSpace {
             assert(!isFinished());
             this->status = FiberStatus::suspended;
             this->yieldedValue = std::move(value);
-#ifdef _WIN32
+#if USE_FCONTEXT
+            this->ctx_main = fctx::detail::jump_fcontext(this->ctx_main, this).fctx;
+#elif USE_WINFIB
             assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
             ::SwitchToFiber(this->pMainFiber);
 #elif USE_UCONTEXT
@@ -284,8 +322,11 @@ namespace FiberSpace {
 
     private:
         /// \brief 子纤程入口的warpper
-
-#ifdef _WIN32
+#if USE_FCONTEXT
+        static void fEntry(fctx::detail::transfer_t transfer) {
+            Fiber *fiber = (Fiber *)transfer.data;
+            fiber->ctx_main = transfer.fctx;
+#elif USE_WINFIB
         static void WINAPI fEntry(Fiber *fiber) {
 #elif USE_UCONTEXT
         static void fEntry(Fiber *fiber) {
@@ -312,7 +353,9 @@ namespace FiberSpace {
             }
             fiber->status = FiberStatus::closed;
             fiber->yieldedValue = std::nullopt;
-#ifdef _WIN32
+#if USE_FCONTEXT
+            fiber->ctx_main = fctx::detail::jump_fcontext(fiber->ctx_main, fiber).fctx;
+#elif USE_WINFIB
             ::SwitchToFiber(fiber->pMainFiber);
 #elif USE_SJLJ
             ::siglongjmp(fiber->buf_main, 1);
@@ -431,6 +474,7 @@ int main() {
         arg1Fiber.next();
         arg1Fiber.next();
         arg1Fiber.next();
+        arg1Fiber.next();
     }
     assert(destructedFlag);
     {
@@ -447,7 +491,7 @@ int main() {
     assert(destructedFlag);
 
     for (auto&& result : Fiber<array<int, 4>>(permutation, array<int, 4> { 1, 2, 3, 4 })) {
-        copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
-        cout << endl;
+       copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
+       cout << endl;
     }
 }
