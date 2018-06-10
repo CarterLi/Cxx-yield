@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iterator>
 #include <iostream>
+#include <memory>
 #ifdef _WIN32
 #   ifdef WIN32_LEAD_AND_MEAN
 #       include <Windows.h>
@@ -10,9 +11,10 @@
 #       include <Windows.h>
 #       undef WIN32_LEAD_AND_MEAN
 #   endif
-#else
+#elif !defined(__APPLE__)
 #   include <ucontext.h>
-#   include <memory>
+#else
+#   error OSX is not supported
 #endif
 
 namespace FiberSpace {
@@ -40,9 +42,8 @@ namespace FiberSpace {
      * \warning 无线程安全
      * \param 子纤程返回类型
      */
-    template <typename YieldValueType>
+    template <typename YieldValueType = void>
     class Fiber {
-        static_assert(!std::is_same<YieldValueType, void>::value, "A fiber which return void is unsupported");
         typedef std::function<YieldValueType ()> FuncType;
 
         /** \brief 纤程参数结构体
@@ -208,6 +209,124 @@ namespace FiberSpace {
         }
     };
 
+    // 无返回值特化囧
+    template <>
+    class Fiber<void> {
+        typedef std::function<void ()> FuncType;
+
+        struct Param {
+            template <typename Fn>
+            Param(Fn&& f)
+                : func(std::forward<Fn>(f))
+#ifndef _WIN32
+                , fnew_stack(new uint8_t[SIGSTKSZ])
+#endif
+                {};
+            std::exception_ptr eptr;
+            bool flagFinish;
+            FuncType func;
+#ifdef _WIN32
+            PVOID pMainFiber, pNewFiber;
+            bool isFormerAThread;
+#else
+            ucontext_t ctx_main, ctx_fnew;
+            const std::unique_ptr<uint8_t[]> fnew_stack;
+#endif
+        } param;
+
+    public:
+        template <typename Fn>
+        Fiber(Fn&& f): param(std::forward<Fn>(f)) {
+#ifdef _WIN32
+#   if defined(_WIN32_WINNT) && (_WIN32_WINNT) > 0x600
+            param.isFormerAThread = IsThreadAFiber() == FALSE;
+#   else
+            param.isFormerAThread = FiberHelper::bNeedConvert;
+#   endif
+            if (param.isFormerAThread) {
+#   if defined(_WIN32_WINNT) && (_WIN32_WINNT) > 0x502
+                param.pMainFiber = ::ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
+#   else
+                param.pMainFiber = ::ConvertThreadToFiber(nullptr);
+#   endif
+#   if !(defined(_WIN32_WINNT) && (_WIN32_WINNT) > 0x600)
+                FiberHelper::bNeedConvert = false;
+#   endif
+            } else {
+                param.pMainFiber = ::GetCurrentFiber();
+            }
+#   if defined(_WIN32_WINNT) && (_WIN32_WINNT) > 0x502
+            param.pNewFiber = ::CreateFiberEx(0, 0, FIBER_FLAG_FLOAT_SWITCH, &fEntry, &param);
+#   else
+            param.pNewFiber = ::CreateFiber(0, &fEntry, nullptr);
+#   endif
+#else
+            ::getcontext(&param.ctx_fnew);
+            param.ctx_fnew.uc_stack.ss_sp = param.fnew_stack.get();
+            param.ctx_fnew.uc_stack.ss_size = SIGSTKSZ;
+            param.ctx_fnew.uc_link = &param.ctx_main;
+            ::makecontext(&param.ctx_fnew, &fEntry, 0);
+#endif
+            param.flagFinish = false;
+        }
+        ~Fiber() {
+            if (!isFinished())
+                std::terminate();
+#ifdef _WIN32
+            ::DeleteFiber(param.pNewFiber);
+            if (param.isFormerAThread) {
+                ::ConvertFiberToThread();
+#   if !(defined(_WIN32_WINNT) && (_WIN32_WINNT) > 0x600)
+                FiberHelper::bNeedConvert = true;
+#   endif
+            }
+#endif
+        }
+        void call() {
+            assert(isFinished() == false);
+            void* oldPara = FiberHelper::paraThis;
+            FiberHelper::paraThis = &param;
+#ifdef _WIN32
+            ::SwitchToFiber(param.pNewFiber);
+#else
+            ::swapcontext(&param.ctx_main, &param.ctx_fnew);
+#endif
+            FiberHelper::paraThis = oldPara;
+            if (!(param.eptr == std::exception_ptr()))
+                std::rethrow_exception(param.eptr);
+        }
+        bool isFinished() { return param.flagFinish; }
+        static void yield() {
+            assert(FiberHelper::paraThis != nullptr && "Fiber::yield() called with no active fiber");
+            Param& param = *reinterpret_cast<Param *>(FiberHelper::paraThis);
+#ifdef _WIN32
+            ::SwitchToFiber(param.pMainFiber);
+#else
+            ::swapcontext(&param.ctx_fnew, &param.ctx_main);
+#endif
+        }
+
+    private:
+#ifdef _WIN32
+        static void WINAPI fEntry(void *) {
+#else
+        static void fEntry() {
+#endif
+            assert(FiberHelper::paraThis != nullptr);
+            Param& param = *reinterpret_cast<Param *>(FiberHelper::paraThis);
+            param.flagFinish = false;
+            try {
+                param.func();
+            } catch (...) {
+                param.eptr = std::current_exception();
+            }
+            param.flagFinish = true;
+#ifdef _WIN32
+            ::SwitchToFiber(param.pMainFiber);
+#endif
+        }
+    };
+
     /** \brief 纤程迭代器类
      *
      * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
@@ -316,22 +435,20 @@ long TestException() {
     }
 }
 
-class DerivedFiber: public Fiber<char> {
+class DerivedFiber: public Fiber<> {
 public:
     DerivedFiber(): Fiber(std::bind(&DerivedFiber::run, this)) {}
 
 private:
-    char run() {
+    void run() {
         puts("Derived fiber running.");
-        return 0;
     }
 };
 
-char fiberFunc() {
+void fiberFunc() {
     puts("Composed fiber running.");
-    Fiber<char>::yield(0);
+    Fiber<>::yield();
     puts("Composed fiber running.");
-    return 0;
 }
 
 int main() {
@@ -353,7 +470,7 @@ int main() {
     // Test from dlang.org
     // create instances of each type
     unique_ptr<DerivedFiber> derived(new DerivedFiber);
-    unique_ptr<Fiber<char>> composed(new Fiber<char>(&fiberFunc));
+    unique_ptr<Fiber<>> composed(new Fiber<void>(&fiberFunc));
 
     // call both fibers once
     derived->call();
@@ -384,7 +501,35 @@ int main() {
     for (auto i : Fiber<long>(Test3))
         cout << i << ' ';
     cout << endl;
-
+#if 0 // Test failed
+    {
+    unique_ptr<Fiber<char>> child, parent;
+    child.reset(new Fiber<char>([&] () -> char {
+        puts("before call parent");
+        parent->call();
+        puts("after call parent");
+        return 0;
+    }));
+    parent.reset(new Fiber<char>([&] () -> char {
+        puts("before call child");
+        child->call();
+        puts("after call child");
+        return 0;
+    }));
+    parent->call();
+    }
+#endif
+#if 0   // pass, but you should not write this
+    {
+    unique_ptr<Fiber<char>> f;
+    f.reset(new Fiber<char>([&] () -> char {
+        puts("f!!!");
+        Sleep(500);
+        return f->call();
+    }));
+    f->call();
+    }
+#endif
 #if !(defined(__GNUC__) && defined(_WIN32))
     // 测试深层调用及异常安全
     // Test fail with MinGW
@@ -397,7 +542,7 @@ int main() {
 #endif
 }
 /*
-Tested with VS2010(icl), MinGW-g++, VMware-archlinux-g++
+Tested with VS2010(icl), MinGW-g++, archlinux-g++
 Expected Output:
 main, i = 0
 func, i = 0
