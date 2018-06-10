@@ -1,0 +1,15 @@
+build:
+  image: teaci/msys$$arch
+  pull: true
+  shell: mingw$$arch
+  commands:
+    - if [ $$arch = 32 ]; then target=i686; fi
+    - if [ $$arch = 64 ]; then target=x86_64; fi
+    - pacman -S --needed --noconfirm --noprogressbar mingw-w64-${target}-boost
+    - cd benchmark
+    - make CXX="g++ -DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -I/mingw$$arch/include -L/mingw$$arch/lib"
+
+matrix:
+  arch:
+    - 64
+    - 32
