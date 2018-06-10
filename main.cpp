@@ -52,10 +52,10 @@
 #if __has_include(<optional>)
 #   include <optional>
 #else
-#   include <experimental/optional>
+#   include <experimental/optional> // Apple Clang doesn't support std::optional (yet)
 namespace std {
     using ::std::experimental::optional;
-    using ::std::experimental::nullopt;
+    using ::std::experimental::nullopt; // std::experimental::optional doesn't support reset
 }
 #endif
 
@@ -73,7 +73,7 @@ namespace FiberSpace {
      * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
      */
     struct FiberReturn {
-        template <typename YieldValueType>
+        template <typename ValueType>
         friend class Fiber;
 
     private:
@@ -88,9 +88,9 @@ namespace FiberSpace {
     /** \brief 主纤程类
      *
      * \warning 线程安全（？）
-     * \tparam YieldValueType 子纤程返回类型
+     * \tparam ValueType 子纤程返回类型
      */
-    template <typename YieldValueType>
+    template <typename ValueType>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
@@ -98,13 +98,23 @@ namespace FiberSpace {
         typedef std::function<void(Fiber& fiber)> FuncType;
 
         /// \brief 子纤程返回值
-        std::optional<YieldValueType> yieldedValue;
+        std::optional<ValueType> currentValue;
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
         /// \brief 子纤程是否结束
         FiberStatus status = FiberStatus::unstarted;
         /// \brief 真子纤程入口，第一个参数传入纤程对象的引用
         FuncType func;
+
+#if USE_UCONTEXT || USE_SJLJ
+        struct alignas(16) StackBuf {
+            uint8_t* get() { return buf; }
+            size_t size() { return SIGSTKSZ; }
+
+        private:
+            uint8_t buf[SIGSTKSZ];
+        };
+#endif
 
         /// \brief 纤程信息
 #if USE_FCONTEXT
@@ -117,13 +127,12 @@ namespace FiberSpace {
         fctx::stack_context fnew_stack;
 #elif USE_WINFIB
         PVOID pMainFiber, pNewFiber;
-        bool isFormerAThread;
 #elif USE_UCONTEXT
         ::ucontext_t ctx_main, ctx_fnew;
-        const std::unique_ptr<std::array<uint8_t, SIGSTKSZ>> fnew_stack = std::make_unique<std::array<uint8_t, SIGSTKSZ>>();
+        const std::unique_ptr<StackBuf> fnew_stack = std::make_unique<StackBuf>();
 #elif USE_SJLJ
         ::sigjmp_buf buf_main, buf_new;
-        const std::unique_ptr<std::array<uint8_t, SIGSTKSZ>> fnew_stack = std::make_unique<std::array<uint8_t, SIGSTKSZ>>();
+        const std::unique_ptr<StackBuf> fnew_stack = std::make_unique<StackBuf>();
         struct sigaction old_sa;
         static Fiber *that;
 #endif
@@ -140,8 +149,8 @@ namespace FiberSpace {
             this->fnew_stack = this->stack_allocator.allocate();
             this->ctx_fnew = fctx::detail::make_fcontext(this->fnew_stack.sp, this->fnew_stack.size, fEntry);
 #elif USE_WINFIB
-            this->isFormerAThread = !IsThreadAFiber();
-            if (this->isFormerAThread) {
+            if (!IsThreadAFiber()) {
+                // WARNING: We won't convert main fiber back to thread for performance reasons
                 this->pMainFiber = ::ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
             } else {
                 this->pMainFiber = ::GetCurrentFiber();
@@ -203,9 +212,6 @@ namespace FiberSpace {
             this->stack_allocator.deallocate(this->fnew_stack);
 #elif USE_WINFIB
             ::DeleteFiber(this->pNewFiber);
-            if (this->isFormerAThread) {
-                ::ConvertFiberToThread();
-            }
 #endif
         }
 
@@ -217,23 +223,22 @@ namespace FiberSpace {
          * \return 返回子纤程是否尚未结束
          */
         bool next() {
-            assert(!isFinished());
-#if USE_FCONTEXT
-            this->ctx_fnew = fctx::detail::jump_fcontext(this->ctx_fnew, this).fctx;
-#elif USE_WINFIB
-            assert(GetCurrentFiber() != this->pNewFiber && "如果你想递归自己，请创建一个新纤程");
-            ::SwitchToFiber(this->pNewFiber);
-#elif USE_UCONTEXT
-            ::swapcontext(&this->ctx_main, &this->ctx_fnew);
-#elif USE_SJLJ
-            if (!::sigsetjmp(this->buf_main, 0)) {
-                ::siglongjmp(this->buf_new, 1);
-            }
-#endif
-            if (this->eptr) {
-                std::rethrow_exception(std::exchange(this->eptr, nullptr));
-            }
+            this->currentValue = std::nullopt;
+            this->jumpNew();
+            return !isFinished();
+        }
 
+        /** \brief 调用子纤程
+         *
+         * 程序流程转入子纤程，并传入值（可通过 current() 获取）
+         *
+         * \param value 传入子纤程的值
+         * \warning 子纤程必须尚未结束
+         * \return 返回子纤程是否尚未结束
+         */
+        bool next(ValueType value) {
+            this->currentValue = std::move(value);
+            this->jumpNew();
             return !isFinished();
         }
 
@@ -247,7 +252,7 @@ namespace FiberSpace {
          */
         bool throw_(std::exception_ptr&& eptr) {
             assert(!isFinished());
-            this->eptr = std::exchange(eptr, nullptr);
+            this->eptr = std::move(eptr);
             return next();
         }
 
@@ -255,19 +260,28 @@ namespace FiberSpace {
          *
          * 向子纤程内部抛出 FiberReturn 异常，以强制退出子纤程，并确保子纤程函数中所有对象都正确析构
          *
-         * \warning 子纤程必须尚未结束
+         * \warning 如果子纤程尚未开始或已经结束，本函数不做任何事情
          */
         void return_() {
-            assert(!isFinished());
+            if (this->status == FiberStatus::unstarted || isFinished()) return;
             throw_(std::make_exception_ptr(FiberReturn()));
             assert(isFinished() && "请勿吃掉 FiberReturn 异常！！！");
         }
 
         /** \brief 获得子纤程返回的值
-         * \return 子纤程返回的值。如果子纤程没有启动，则返回默认构造值
+         * \warning 可能为空（nullopt）
+         * \return 子纤程返回的值
          */
-        const YieldValueType& current() const {
-            return *this->yieldedValue;
+        const auto& current() const noexcept {
+            return this->currentValue;
+        }
+
+        /** \brief 获得子纤程返回的值
+         * \warning 可能为空（nullopt）
+         * \return 子纤程返回的值
+         */
+        auto&& current() noexcept {
+            return this->currentValue;
         }
 
         /** \brief 判断子纤程是否结束
@@ -283,27 +297,18 @@ namespace FiberSpace {
          *          参数类型必须与子纤程返回值相同，无类型安全
          * \param value 输出到主纤程的值
          */
-        void yield(YieldValueType value) {
-            assert(!isFinished());
-            this->status = FiberStatus::suspended;
-            this->yieldedValue = std::move(value);
-#if USE_FCONTEXT
-            this->ctx_main = fctx::detail::jump_fcontext(this->ctx_main, this).fctx;
-#elif USE_WINFIB
-            assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
-            ::SwitchToFiber(this->pMainFiber);
-#elif USE_UCONTEXT
-            ::swapcontext(&this->ctx_fnew, &this->ctx_main);
-#else
-            if (!::sigsetjmp(this->buf_new, 0)) {
-                ::siglongjmp(this->buf_main, 1);
-            }
-#endif
-            this->status = FiberStatus::running;
+        void yield(ValueType value) {
+            this->currentValue = std::move(value);
+            this->jumpMain();
+        }
 
-            if (this->eptr) {
-                std::rethrow_exception(std::exchange(this->eptr, nullptr));
-            }
+        /** \brief 转回主纤程并但不输出值
+         *
+         * \warning 必须由子纤程调用
+         */
+        void yield() {
+            this->currentValue = std::nullopt;
+            this->jumpMain();
         }
 
         /** \brief 输出子纤程的所有值
@@ -312,7 +317,7 @@ namespace FiberSpace {
         void yieldAll(Fiber& fiber) {
             assert(&fiber != this);
             while (fiber.next()) {
-                this->yield(fiber.current());
+                this->yield(*fiber.current());
             }
         }
 
@@ -321,6 +326,53 @@ namespace FiberSpace {
         }
 
     private:
+        /// \brief 控制流跳转主纤程
+        void jumpMain() {
+            assert(!isFinished());
+            this->status = FiberStatus::suspended;
+
+#if USE_FCONTEXT
+            this->ctx_main = fctx::detail::jump_fcontext(this->ctx_main, this).fctx;
+#elif USE_WINFIB
+            assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
+            ::SwitchToFiber(this->pMainFiber);
+#elif USE_UCONTEXT
+            ::swapcontext(&this->ctx_fnew, &this->ctx_main);
+#elif USE_SJLJ
+            if (!::sigsetjmp(this->buf_new, 0)) {
+                ::siglongjmp(this->buf_main, 1);
+            }
+#endif
+            // We are back to new coroutine now
+            this->status = FiberStatus::running;
+
+            if (this->eptr) {
+                std::rethrow_exception(std::exchange(this->eptr, nullptr));
+            }
+        }
+
+        /// \brief 控制流跳转子纤程
+        void jumpNew() {
+            assert(!isFinished());
+#if USE_FCONTEXT
+            this->ctx_fnew = fctx::detail::jump_fcontext(this->ctx_fnew, this).fctx;
+#elif USE_WINFIB
+            assert(GetCurrentFiber() != this->pNewFiber && "如果你想递归自己，请创建一个新纤程");
+            ::SwitchToFiber(this->pNewFiber);
+#elif USE_UCONTEXT
+            ::swapcontext(&this->ctx_main, &this->ctx_fnew);
+#elif USE_SJLJ
+            if (!::sigsetjmp(this->buf_main, 0)) {
+                ::siglongjmp(this->buf_new, 1);
+            }
+#endif
+            // We are back to main coroutine now
+
+            if (this->eptr) {
+                std::rethrow_exception(std::exchange(this->eptr, nullptr));
+            }
+        }
+
         /// \brief 子纤程入口的warpper
 #if USE_FCONTEXT
         static void fEntry(fctx::detail::transfer_t transfer) {
@@ -352,7 +404,7 @@ namespace FiberSpace {
                 }
             }
             fiber->status = FiberStatus::closed;
-            fiber->yieldedValue = std::nullopt;
+            fiber->currentValue = std::nullopt;
 #if USE_FCONTEXT
             fiber->ctx_main = fctx::detail::jump_fcontext(fiber->ctx_main, fiber).fctx;
 #elif USE_WINFIB
@@ -364,8 +416,8 @@ namespace FiberSpace {
     };
 
 #if USE_SJLJ
-    template <typename YieldValueType>
-    Fiber<YieldValueType> *Fiber<YieldValueType>::that;
+    template <typename ValueType>
+    Fiber<ValueType> *Fiber<ValueType>::that;
 #endif
 
     /** \brief 纤程迭代器类
@@ -373,14 +425,14 @@ namespace FiberSpace {
      * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
      * 用于 C++11 for (... : ...)
      */
-    template <typename YieldValueType>
-    struct FiberIterator : std::iterator<std::output_iterator_tag, YieldValueType> {
+    template <typename ValueType>
+    struct FiberIterator : std::iterator<std::output_iterator_tag, ValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}
         /** \brief 迭代器首
          * \param _f 主线程类的引用
          */
-        FiberIterator(Fiber<YieldValueType>& _f) : fiber(&_f) {
+        FiberIterator(Fiber<ValueType>& _f) : fiber(&_f) {
             next();
         }
 
@@ -391,9 +443,9 @@ namespace FiberSpace {
         }
 
         /// \brief 取得返回值
-        const YieldValueType &operator *() const {
+        const ValueType &operator *() const {
             assert(fiber != nullptr);
-            return fiber->current();
+            return *fiber->current();
         }
 
         /** \brief 比较迭代器相等
@@ -414,28 +466,31 @@ namespace FiberSpace {
             if (!fiber->next()) fiber = nullptr;
         }
 
-        Fiber<YieldValueType>* fiber;
+        Fiber<ValueType>* fiber;
     };
 
     /// \brief 返回迭代器首
-    template <typename YieldValueType>
-    FiberIterator<YieldValueType> begin(Fiber<YieldValueType>& fiber) {
-        return FiberIterator<YieldValueType>(fiber);
+    template <typename ValueType>
+    FiberIterator<ValueType> begin(Fiber<ValueType>& fiber) {
+        return FiberIterator<ValueType>(fiber);
     }
 
     /// \brief 返回迭代器尾
-    template <typename YieldValueType>
-    FiberIterator<YieldValueType> end(Fiber<YieldValueType>&) noexcept {
-        return FiberIterator<YieldValueType>();
+    template <typename ValueType>
+    FiberIterator<ValueType> end(Fiber<ValueType>&) noexcept {
+        return FiberIterator<ValueType>();
     }
 }
 
 using namespace std;
 using FiberSpace::Fiber;
 
-bool destructedFlag = false;
+bool destructedFlag = true;
 
 struct TestDestruct {
+    TestDestruct() {
+        destructedFlag = false;
+    }
     ~TestDestruct() {
         destructedFlag = true;
     }
@@ -445,7 +500,7 @@ void foo(Fiber<bool>& fiber, int arg) {
     TestDestruct test;
     for (int i = 1; i < 5; i++) {
         printf("goroutine :%d\n", arg + i);
-        fiber.yield(false);
+        fiber.yield();
     }
 }
 
@@ -471,6 +526,11 @@ void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr) {
 int main() {
     {
         Fiber<bool> arg1Fiber(foo, 0);
+    }
+    assert(destructedFlag);
+    {
+        Fiber<bool> arg1Fiber(foo, 0);
+        arg1Fiber.next();
         arg1Fiber.next();
         arg1Fiber.next();
         arg1Fiber.next();
@@ -491,7 +551,7 @@ int main() {
     assert(destructedFlag);
 
     for (auto&& result : Fiber<array<int, 4>>(permutation, array<int, 4> { 1, 2, 3, 4 })) {
-       copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
-       cout << endl;
+        copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
+        cout << endl;
     }
 }
