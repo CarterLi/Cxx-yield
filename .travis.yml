@@ -1,0 +1,21 @@
+compiler:
+  - gcc
+before_install:
+  - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
+  - sudo apt-get update -q
+  - sudo apt-get install gcc-8 g++-8 -y
+  - sudo rm /usr/bin/gcc /usr/bin/g++
+  - sudo ln -s /usr/bin/gcc-8 /usr/bin/gcc
+  - sudo ln -s /usr/bin/g++-8 /usr/bin/g++
+  - wget https://dl.bintray.com/boostorg/release/1.67.0/source/boost_1_67_0.tar.bz2
+  - tar jxf boost_1_67_0.tar.bz2
+  - cd boost_1_67_0
+  - ./bootstrap.sh
+  - ./b2 --with-context --toolset=gcc cxxflags=-std=c++14
+addons:
+  apt:
+    update: true
+script:
+  - cd ../benchmark
+  - export LD_LIBRARY_PATH="../boost_1_67_0/stage/lib:$LD_LIBRARY_PATH"
+  - make CXX="g++ -I../boost_1_67_0 -L../boost_1_67_0/stage/lib" LDFLAGS="-lboost_context"
