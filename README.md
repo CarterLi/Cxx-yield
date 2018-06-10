@@ -61,3 +61,7 @@ And also said by [boost](https://www.boost.org/doc/libs/1_67_0/libs/context/doc/
 ## Tests and examples
 
 See `main.cpp`
+
+## Benchmarks
+
+See `benchmark`
