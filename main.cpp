@@ -13,11 +13,17 @@
 #       include <Windows.h>
 #       undef WIN32_LEAD_AND_MEAN
 #   endif
-#else
+#elif !defined(__ANDROID__) && __has_include(<ucontext.h>)
 #   if defined(__APPLE__)
 #       define _XOPEN_SOURCE
 #   endif
 #   include <ucontext.h>
+#   define USE_UCONTEXT 1
+#else
+#   include <setjmp.h>
+#   include <signal.h>
+#   include <unistd.h>
+#   define USE_SJLJ 1
 #endif
 
 #include <functional>
@@ -27,7 +33,15 @@
 #include <array>
 #include <memory>
 #include <algorithm>
-#include <experimental/optional>
+#if __has_include(<optional>)
+#   include <optional>
+#else
+#   include <experimental/optional>
+namespace std {
+    using ::std::experimental::optional;
+    using ::std::experimental::nullopt;
+}
+#endif
 
 namespace FiberSpace {
     enum class FiberStatus {
@@ -60,10 +74,10 @@ namespace FiberSpace {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
 
-        typedef std::function<void (Fiber& fiber)> FuncType;
+        typedef std::function<void(Fiber& fiber)> FuncType;
 
         /// \brief 子纤程返回值
-        std::experimental::optional<YieldValueType> yieldedValue;
+        std::optional<YieldValueType> yieldedValue;
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
         /// \brief 子纤程是否结束
@@ -75,9 +89,14 @@ namespace FiberSpace {
 #ifdef _WIN32
         PVOID pMainFiber, pNewFiber;
         bool isFormerAThread;
-#else
-        ucontext_t ctx_main, ctx_fnew;
+#elif USE_UCONTEXT
+        ::ucontext_t ctx_main, ctx_fnew;
         const std::unique_ptr<std::array<uint8_t, SIGSTKSZ>> fnew_stack = std::make_unique<std::array<uint8_t, SIGSTKSZ>>();
+#elif USE_SJLJ
+        ::sigjmp_buf buf_main, buf_new;
+        const std::unique_ptr<std::array<uint8_t, SIGSTKSZ>> fnew_stack = std::make_unique<std::array<uint8_t, SIGSTKSZ>>();
+        struct sigaction old_sa;
+        static Fiber *that;
 #endif
 
     public:
@@ -97,22 +116,45 @@ namespace FiberSpace {
             }
             // default stack size
             this->pNewFiber = ::CreateFiberEx(0, 0, FIBER_FLAG_FLOAT_SWITCH, (void(*)(void *))&fEntry, this);
-#else
+#elif USE_UCONTEXT
             ::getcontext(&this->ctx_fnew);
             this->ctx_fnew.uc_stack.ss_sp = this->fnew_stack.get();
             this->ctx_fnew.uc_stack.ss_size = this->fnew_stack->size();
             this->ctx_fnew.uc_link = &this->ctx_main;
             ::makecontext(&this->ctx_fnew, (void(*)())&fEntry, 1, this);
+#elif USE_SJLJ
+            ::stack_t sigstk, oldstk;
+            sigstk.ss_sp = this->fnew_stack.get();
+            sigstk.ss_size = this->fnew_stack->size();
+            sigstk.ss_flags = 0;
+            assert(::sigaltstack(&sigstk, &oldstk) == 0 && "Error while set sigstk");
+
+            struct sigaction sa;
+            sa.sa_flags = SA_ONSTACK;
+            sa.sa_handler = fEntry;
+            sigemptyset(&sa.sa_mask);
+            assert(::sigaction(SIGUSR2, &sa, &this->old_sa) == 0 && "Error while installing a signal handler");
+
+            if (!sigsetjmp(this->buf_main, 0)) {
+                Fiber::that = this; // Android doesn't support sigqueue,
+                assert(::raise(SIGUSR2) == 0 && "Failed to queue the signal");
+            }
+            assert(::sigaltstack(&oldstk, nullptr) == 0 && "Error while reset sigstk");
+
+            ::sigset_t sa_mask;
+            sigemptyset(&sa_mask);
+            sigaddset(&sa_mask, SIGUSR2);
+            ::sigprocmask(SIG_UNBLOCK, &sa_mask, nullptr);
 #endif
         }
 
         template <class Fp, class ...Args,
             class = typename std::enable_if
-            <
-                (sizeof...(Args) > 0)
-            >::type
-        >
-        explicit Fiber(Fp&& f, Args&&... args): Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {}
+                <
+                    (sizeof...(Args) > 0)
+                >::type
+            >
+            explicit Fiber(Fp&& f, Args&&... args) : Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {}
 
         /** \brief 析构函数
          *
@@ -145,8 +187,12 @@ namespace FiberSpace {
 #ifdef _WIN32
             assert(GetCurrentFiber() != this->pNewFiber && "如果你想递归自己，请创建一个新纤程");
             ::SwitchToFiber(this->pNewFiber);
-#else
+#elif USE_UCONTEXT
             ::swapcontext(&this->ctx_main, &this->ctx_fnew);
+#elif USE_SJLJ
+            if (!::sigsetjmp(this->buf_main, 0)) {
+                ::siglongjmp(this->buf_new, 1);
+            }
 #endif
             if (this->eptr) {
                 std::rethrow_exception(std::exchange(this->eptr, nullptr));
@@ -189,8 +235,8 @@ namespace FiberSpace {
         }
 
         /** \brief 判断子纤程是否结束
-        * \return 子纤程已经结束(return)返回true，否则false
-        */
+         * \return 子纤程已经结束(return)返回true，否则false
+         */
         bool isFinished() const noexcept {
             return this->status == FiberStatus::closed;
         }
@@ -208,8 +254,12 @@ namespace FiberSpace {
 #ifdef _WIN32
             assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
             ::SwitchToFiber(this->pMainFiber);
-#else
+#elif USE_UCONTEXT
             ::swapcontext(&this->ctx_fnew, &this->ctx_main);
+#else
+            if (!::sigsetjmp(this->buf_new, 0)) {
+                ::siglongjmp(this->buf_main, 1);
+            }
 #endif
             this->status = FiberStatus::running;
 
@@ -237,39 +287,56 @@ namespace FiberSpace {
 
 #ifdef _WIN32
         static void WINAPI fEntry(Fiber *fiber) {
-#else
+#elif USE_UCONTEXT
         static void fEntry(Fiber *fiber) {
+#elif USE_SJLJ
+        static void fEntry(int signo) {
+            Fiber *fiber = std::exchange(Fiber::that, nullptr);
+            assert(sigaction(signo, &fiber->old_sa, nullptr) == 0 && "Failed to reset signal handler");
+            if (!::sigsetjmp(fiber->buf_new, 0)) {
+                ::siglongjmp(fiber->buf_main, 1);
+            }
 #endif
+
             if (!fiber->eptr) {
                 fiber->status = FiberStatus::running;
                 try {
                     fiber->func(*fiber);
-                } catch (FiberReturn &) {
+                }
+                catch (FiberReturn &) {
                     // 主 Fiber 对象正在析构
-                } catch (...) {
+                }
+                catch (...) {
                     fiber->eptr = std::current_exception();
                 }
             }
             fiber->status = FiberStatus::closed;
-            fiber->yieldedValue = std::experimental::nullopt;
+            fiber->yieldedValue = std::nullopt;
 #ifdef _WIN32
             ::SwitchToFiber(fiber->pMainFiber);
+#elif USE_SJLJ
+            ::siglongjmp(fiber->buf_main, 1);
 #endif
         }
     };
 
+#if USE_SJLJ
+    template <typename YieldValueType>
+    Fiber<YieldValueType> *Fiber<YieldValueType>::that;
+#endif
+
     /** \brief 纤程迭代器类
-    *
-    * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
-    * 用于 C++11 for (... : ...)
-    */
+     *
+     * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
+     * 用于 C++11 for (... : ...)
+     */
     template <typename YieldValueType>
     struct FiberIterator : std::iterator<std::output_iterator_tag, YieldValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}
         /** \brief 迭代器首
-        * \param _f 主线程类的引用
-        */
+         * \param _f 主线程类的引用
+         */
         FiberIterator(Fiber<YieldValueType>& _f) : fiber(&_f) {
             next();
         }
@@ -287,10 +354,10 @@ namespace FiberSpace {
         }
 
         /** \brief 比较迭代器相等
-        *
-        * 通常用于判断迭代是否结束
-        * 最好别干别的 ;P
-        */
+         *
+         * 通常用于判断迭代是否结束
+         * 最好别干别的 ;P
+         */
         bool operator ==(const FiberIterator& rhs) const noexcept {
             return fiber == rhs.fiber;
         }
@@ -334,7 +401,7 @@ struct TestDestruct {
 void foo(Fiber<bool>& fiber, int arg) {
     TestDestruct test;
     for (int i = 1; i < 5; i++) {
-        printf("goroutine :%d\n", arg+i);
+        printf("goroutine :%d\n", arg + i);
         fiber.yield(false);
     }
 }
@@ -348,19 +415,34 @@ void do_permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr, int length) 
             newArr.back() = arr[i];
             fiber.yieldAll(Fiber<array<int, 4>>(do_permutation, newArr, length - 1));
         }
-    } else {
+    }
+    else {
         fiber.yield(arr);
     }
 }
 
 void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr) {
-    do_permutation(fiber, arr, arr.size());
+    do_permutation(fiber, arr, (int)arr.size());
 }
 
 int main() {
     {
         Fiber<bool> arg1Fiber(foo, 0);
         arg1Fiber.next();
+        arg1Fiber.next();
+        arg1Fiber.next();
+    }
+    assert(destructedFlag);
+    {
+        Fiber<bool> arg1Fiber(foo, 0);
+        arg1Fiber.next();
+        arg1Fiber.next();
+        arg1Fiber.next();
+    }
+    assert(destructedFlag);
+    {
+        Fiber<bool> arg1Fiber(foo, 0);
+        for (auto&& result : arg1Fiber) {}
     }
     assert(destructedFlag);
 
