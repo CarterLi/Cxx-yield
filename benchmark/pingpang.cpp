@@ -40,6 +40,6 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
     ping();
     auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    long long duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     std::printf("%lldms: pingCount %d, pangCount %d\n", duration, pingCount, pangCount);
 }

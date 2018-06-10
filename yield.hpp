@@ -32,6 +32,7 @@
 #       if defined(__APPLE__)
 #           define _XOPEN_SOURCE
 #       endif
+#       include <signal.h>
 #       include <ucontext.h>
 #       define USE_UCONTEXT 1
 #   else
@@ -108,7 +109,7 @@ namespace FiberSpace {
 
 #if USE_UCONTEXT || USE_SJLJ
         struct alignas(16) StackBuf {
-            uint8_t* get() { return buf; }
+            uint8_t* get() { return this->buf; }
             size_t size() { return SIGSTKSZ; }
 
         private:
