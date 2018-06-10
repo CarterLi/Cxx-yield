@@ -27,6 +27,7 @@
 #include <array>
 #include <memory>
 #include <algorithm>
+#include <experimental/optional>
 
 namespace FiberSpace {
     enum class FiberStatus {
@@ -52,9 +53,9 @@ namespace FiberSpace {
     /** \brief 主纤程类
      *
      * \warning 线程安全（？）
-     * \param YieldValueType 子纤程返回类型
+     * \tparam YieldValueType 子纤程返回类型
      */
-    template <typename YieldValueType = void>
+    template <typename YieldValueType>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
@@ -62,13 +63,14 @@ namespace FiberSpace {
         typedef std::function<void (Fiber& fiber)> FuncType;
 
         /// \brief 子纤程返回值
-        YieldValueType yieldedValue = YieldValueType();
+        std::experimental::optional<YieldValueType> yieldedValue;
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
         /// \brief 子纤程是否结束
         FiberStatus status = FiberStatus::unstarted;
         /// \brief 真子纤程入口，第一个参数传入纤程对象的引用
         FuncType func;
+
         /// \brief 纤程信息
 #ifdef _WIN32
         PVOID pMainFiber, pNewFiber;
@@ -85,7 +87,7 @@ namespace FiberSpace {
          *
          * \param f 子纤程入口
          */
-        Fiber(FuncType f) : func(std::move(f)) {
+        explicit Fiber(FuncType f) : func(std::move(f)) {
 #ifdef _WIN32
             this->isFormerAThread = !IsThreadAFiber();
             if (this->isFormerAThread) {
@@ -102,11 +104,16 @@ namespace FiberSpace {
             this->ctx_fnew.uc_link = &this->ctx_main;
             ::makecontext(&this->ctx_fnew, (void(*)())&fEntry, 1, this);
 #endif
-
-//        template<typename Fn, typename Args...>
-//        Fiber(Fn f,)
-
         }
+
+        template <class Fp, class ...Args,
+            class = typename std::enable_if
+            <
+                (sizeof...(Args) > 0)
+            >::type
+        >
+        explicit Fiber(Fp&& f, Args&&... args): Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {}
+
         /** \brief 析构函数
          *
          * 删除子纤程，并将主纤程转回线程
@@ -177,8 +184,8 @@ namespace FiberSpace {
         /** \brief 获得子纤程返回的值
          * \return 子纤程返回的值。如果子纤程没有启动，则返回默认构造值
          */
-        YieldValueType current() const {
-            return this->yieldedValue;
+        const YieldValueType& current() const {
+            return *this->yieldedValue;
         }
 
         /** \brief 判断子纤程是否结束
@@ -244,6 +251,7 @@ namespace FiberSpace {
                 }
             }
             fiber->status = FiberStatus::closed;
+            fiber->yieldedValue = std::experimental::nullopt;
 #ifdef _WIN32
             ::SwitchToFiber(fiber->pMainFiber);
 #endif
@@ -256,7 +264,7 @@ namespace FiberSpace {
     * 用于 C++11 for (... : ...)
     */
     template <typename YieldValueType>
-    struct FiberIterator : std::iterator<std::input_iterator_tag, YieldValueType> {
+    struct FiberIterator : std::iterator<std::output_iterator_tag, YieldValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}
         /** \brief 迭代器首
@@ -273,9 +281,9 @@ namespace FiberSpace {
         }
 
         /// \brief 取得返回值
-        YieldValueType operator *() const {
+        const YieldValueType &operator *() const {
             assert(fiber != nullptr);
-            return std::move(fiber->current());
+            return fiber->current();
         }
 
         /** \brief 比较迭代器相等
@@ -331,31 +339,32 @@ void foo(Fiber<bool>& fiber, int arg) {
     }
 }
 
-void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr, int length) {
+void do_permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr, int length) {
     if (length) {
         for (auto i = 0; i < length; ++i) {
             array<int, 4> newArr(arr);
             std::copy_n(arr.begin(), i, newArr.begin());
             std::copy_n(arr.begin() + i + 1, arr.size() - i - 1, newArr.begin() + i);
             newArr.back() = arr[i];
-            fiber.yieldAll(Fiber<array<int, 4>>(bind(permutation, placeholders::_1, newArr, length - 1)));
+            fiber.yieldAll(Fiber<array<int, 4>>(do_permutation, newArr, length - 1));
         }
     } else {
         fiber.yield(arr);
     }
 }
 
+void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr) {
+    do_permutation(fiber, arr, arr.size());
+}
+
 int main() {
     {
-        Fiber<bool> arg1Fiber(bind(foo, placeholders::_1, 0));
+        Fiber<bool> arg1Fiber(foo, 0);
         arg1Fiber.next();
     }
     assert(destructedFlag);
 
-    Fiber<array<int, 4>> fiber(
-        bind(permutation, placeholders::_1, array<int, 4> {1, 2, 3, 4}, 4)
-    );
-    for (auto&& result : fiber) {
+    for (auto&& result : Fiber<array<int, 4>>(permutation, array<int, 4> { 1, 2, 3, 4 })) {
         copy(result.begin(), result.end(), std::ostream_iterator<int>(cout, ","));
         cout << endl;
     }
