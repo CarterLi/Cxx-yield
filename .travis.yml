@@ -1,21 +1,41 @@
-compiler:
-  - gcc
-before_install:
-  - sudo add-apt-repository ppa:ubuntu-toolchain-r/test -y
-  - sudo apt-get update -q
-  - sudo apt-get install gcc-8 g++-8 -y
-  - sudo rm /usr/bin/gcc /usr/bin/g++
-  - sudo ln -s /usr/bin/gcc-8 /usr/bin/gcc
-  - sudo ln -s /usr/bin/g++-8 /usr/bin/g++
-  - wget https://dl.bintray.com/boostorg/release/1.67.0/source/boost_1_67_0.tar.bz2
-  - tar jxf boost_1_67_0.tar.bz2
-  - cd boost_1_67_0
-  - ./bootstrap.sh
-  - ./b2 --with-context --toolset=gcc cxxflags=-std=c++14
-addons:
-  apt:
-    update: true
+language: c++
+
 script:
-  - cd ../benchmark
-  - export LD_LIBRARY_PATH="../boost_1_67_0/stage/lib:$LD_LIBRARY_PATH"
-  - make CXX="g++ -I../boost_1_67_0 -L../boost_1_67_0/stage/lib" LDFLAGS="-lboost_context"
+  - cd benchmark && make
+
+matrix:
+  include:
+    - os: linux
+      compiler: gcc
+      dist: trusty
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - g++-8
+          update: true
+      before_install:
+        - sudo rm /usr/bin/gcc /usr/bin/g++
+        - sudo ln -s /usr/bin/gcc-8 /usr/bin/gcc
+        - sudo ln -s /usr/bin/g++-8 /usr/bin/g++
+        - wget https://dl.bintray.com/boostorg/release/1.67.0/source/boost_1_67_0.tar.bz2
+        - tar jxf boost_1_67_0.tar.bz2
+        - cd boost_1_67_0
+        - ./bootstrap.sh
+        - ./b2 --with-context cxxflags=-std=c++11
+        - export LD_LIBRARY_PATH="$(pwd)/stage/lib:/usr/local/lib:/usr/lib:/lib:/usr/local/lib64:/usr/lib64:/lib64:$LD_LIBRARY_PATH"
+        - export CXXFLAGS="-I../boost_1_67_0 -L../boost_1_67_0/stage/lib" LDFLAGS="-lboost_context"
+        - cd ..
+        - pwd && ls
+
+    - os: osx
+      compiler: clang
+      before_install:
+        - rm -f '/usr/local/include/c++'
+        - brew update
+        - brew install llvm
+        - brew link --force llvm
+        - brew install boost || brew upgrade boost
+        - export CC=clang CXX=clang++
+        - pwd && ls
