@@ -29,8 +29,8 @@ For clang, `-std=libc++ -lc++` is used.
 | createalot | msvc-15.7.3      | Windows  | 265ms           |             | 12997ms        |                  |
 | pingpang   | g++-8            | Windows  | 11ms            |             | 36ms           |                  |
 | createalot | g++-8            | Windows  | 204ms           |             | 16135ms        |                  |
-| pingpang   | clang-6.0.0      | Android  | 44ms            |             |                | crash            |
-| createalot | clang-6.0.0      | Android  | 3248ms          |             |                | crash            |
+| pingpang   | clang-6.0.0      | Android  | 36ms            |             |                | 78ms             |
+| createalot | clang-6.0.0      | Android  | 3392ms          |             |                | 3994ms           |
 
 ## Conclusion
 

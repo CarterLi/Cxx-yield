@@ -1,9 +1,6 @@
-#ifndef USE_FCONTEXT
-#   if __has_include(<boost/context/detail/fcontext.hpp>)
+#if USE_FCONTEXT || (!defined(USE_FCONTEXT) && __has_include(<boost/context/detail/fcontext.hpp>))
+#   undef USE_FCONTEXT
 #       define USE_FCONTEXT 1
-#   endif
-#endif
-#if USE_FCONTEXT
 #   include <boost/assert.hpp>
 #   include <boost/context/detail/fcontext.hpp>
 #   ifdef NDEBUG
@@ -12,7 +9,8 @@
 #       include <boost/context/protected_fixedsize_stack.hpp>
 #   endif
 #else
-#   ifdef _WIN32
+#   if USE_WINFIB || (!defined(USE_WINFIB) && defined(_WIN32))
+#       undef USE_WINFIB
 #       define USE_WINFIB 1
 #       ifdef _WIN32_WINNT
 #           if _WIN32_WINNT < 0x0601
@@ -28,18 +26,19 @@
 #           include <Windows.h>
 #           undef WIN32_LEAD_AND_MEAN
 #       endif
-#   elif !defined(__ANDROID__) && __has_include(<ucontext.h>)
+#   elif USE_UCONTEXT || (!defined(USE_UCONTEXT) && !defined(__ANDROID__) && __has_include(<ucontext.h>))
+#       undef USE_UCONTEXT
+#       define USE_UCONTEXT 1
 #       if defined(__APPLE__)
 #           define _XOPEN_SOURCE
 #       endif
 #       include <signal.h>
 #       include <ucontext.h>
-#       define USE_UCONTEXT 1
-#   else
+#   elif USE_SJLJ || (!defined(USE_SJLJ) && __has_include(<unistd.h>))
+#       define USE_SJLJ 1
 #       include <setjmp.h>
 #       include <signal.h>
 #       include <unistd.h>
-#       define USE_SJLJ 1
 #   endif
 #endif
 
@@ -189,6 +188,11 @@ namespace FiberSpace {
                     std::perror("Failed to queue the signal");
                     std::abort();
                 }
+            }
+
+            if (::sigaltstack(&oldstk, nullptr)) {
+                std::perror("Error while reset sigstk");
+                std::abort();
             }
 
             ::sigset_t sa_mask;
