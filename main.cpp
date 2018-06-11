@@ -14,7 +14,7 @@ struct TestDestruct {
     }
 };
 
-void foo(Fiber<bool>& fiber, int arg) {
+void foo(Fiber<void>& fiber, int arg) {
     TestDestruct test;
     for (int i = 1; i < 5; i++) {
         printf("goroutine :%d\n", arg + i);
@@ -43,28 +43,23 @@ void permutation(Fiber<array<int, 4>>& fiber, array<int, 4> arr) {
 
 int main() {
     {
-        Fiber<bool> arg1Fiber(foo, 0);
+        Fiber<> arg1Fiber(foo, 0);
     }
     assert(destructedFlag);
     {
-        Fiber<bool> arg1Fiber(foo, 0);
+        Fiber<> arg1Fiber(foo, 0);
         arg1Fiber.next();
         arg1Fiber.next();
-        arg1Fiber.next();
-        arg1Fiber.next();
-        arg1Fiber.next();
-    }
-    assert(destructedFlag);
-    {
-        Fiber<bool> arg1Fiber(foo, 0);
         arg1Fiber.next();
         arg1Fiber.next();
         arg1Fiber.next();
     }
     assert(destructedFlag);
     {
-        Fiber<bool> arg1Fiber(foo, 0);
-        for (auto&& result : arg1Fiber) {}
+        Fiber<> arg1Fiber(foo, 0);
+        arg1Fiber.next();
+        arg1Fiber.next();
+        arg1Fiber.next();
     }
     assert(destructedFlag);
 

@@ -15,16 +15,16 @@ For clang, `-std=libc++ -lc++` is used.
 
 | test       | compiler         | platform | boost::fcontext | makecontext | Windows fibers | setjmp / longjmp |
 |------------|------------------|----------|-----------------|-------------|----------------|------------------|
-| pingpang   | AppleClang-9.1.0 | macOS    | 9ms             | 2324ms      |                |                  |
-| createalot | AppleClang-9.1.0 | macOS    | 830ms           | 9651ms      |                |                  |
-| pingpang   | clang-6.0.0      | macOS    | 8ms             | 2319ms      |                |                  |
-| createalot | clang-6.0.0      | macOS    | 838ms           | 9724ms      |                |                  |
-| pingpang   | g++-8.1.0        | macOS    | 4ms             | 2337ms      |                |                  |
-| createalot | g++-8.1.0        | macOS    | 791ms           | 9637ms      |                |                  |
-| pingpang   | g++-7.3.0        | Linux    | 4ms             | 317ms       |                |                  |
-| createalot | g++-7.3.0        | Linux    | 55ms            | 1054ms      |                |                  |
-| pingpang   | clang-6.0.0      | Linux    | 8ms             | 293ms       |                |                  |
-| createalot | clang-6.0.0      | Linux    | 63ms            | 1060ms      |                |                  |
+| pingpang   | AppleClang-9.1.0 | macOS    | 9ms             | 2324ms      |                | CRASH            |
+| createalot | AppleClang-9.1.0 | macOS    | 830ms           | 9651ms      |                | CRASH            |
+| pingpang   | clang-6.0.0      | macOS    | 8ms             | 2350ms      |                | CRASH            |
+| createalot | clang-6.0.0      | macOS    | 866ms           | 9953ms      |                | CRASH            |
+| pingpang   | g++-8.1.0        | macOS    | 4ms             | 2337ms      |                | CRASH            |
+| createalot | g++-8.1.0        | macOS    | 791ms           | 9637ms      |                | CRASH            |
+| pingpang   | g++-7.3.0        | Linux    | 3ms             | 299ms       |                | CRASH            |
+| createalot | g++-7.3.0        | Linux    | 53ms            | 1052ms      |                | CRASH            |
+| pingpang   | clang-6.0.0      | Linux    | 7ms             | 281ms       |                | 19ms !           |
+| createalot | clang-6.0.0      | Linux    | 52ms            | 984ms       |                | 2980ms !         |
 | pingpang   | msvc-15.7.3      | Windows  | 21ms            |             | 37ms           |                  |
 | createalot | msvc-15.7.3      | Windows  | 265ms           |             | 12997ms        |                  |
 | pingpang   | g++-8            | Windows  | 11ms            |             | 36ms           |                  |
