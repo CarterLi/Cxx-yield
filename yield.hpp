@@ -169,24 +169,35 @@ namespace FiberSpace {
             sigstk.ss_sp = this->fnew_stack.get();
             sigstk.ss_size = this->fnew_stack->size();
             sigstk.ss_flags = 0;
-            assert(::sigaltstack(&sigstk, &oldstk) == 0 && "Error while set sigstk");
+            if (::sigaltstack(&sigstk, &oldstk)) {
+                 std::perror("Error while set sigstk");
+                 std::abort();
+            }
 
             struct sigaction sa;
             sa.sa_flags = SA_ONSTACK;
             sa.sa_handler = fEntry;
             sigemptyset(&sa.sa_mask);
-            assert(::sigaction(SIGUSR2, &sa, &this->old_sa) == 0 && "Error while installing a signal handler");
+            if (::sigaction(SIGUSR2, &sa, &this->old_sa)) {
+                std::perror("Error while installing a signal handler");
+                std::abort();
+            }
 
             if (!sigsetjmp(this->buf_main, 0)) {
                 Fiber::that = this; // Android doesn't support sigqueue,
-                assert(::raise(SIGUSR2) == 0 && "Failed to queue the signal");
+                if (::raise(SIGUSR2)) {
+                    std::perror("Failed to queue the signal");
+                    std::abort();
+                }
             }
-            assert(::sigaltstack(&oldstk, nullptr) == 0 && "Error while reset sigstk");
 
             ::sigset_t sa_mask;
             sigemptyset(&sa_mask);
             sigaddset(&sa_mask, SIGUSR2);
-            ::sigprocmask(SIG_UNBLOCK, &sa_mask, nullptr);
+            if (::sigprocmask(SIG_UNBLOCK, &sa_mask, nullptr)) {
+                std::perror("Error while reset sigprocmask");
+                std::abort();
+            }
 #endif
         }
 
@@ -386,7 +397,10 @@ namespace FiberSpace {
 #elif USE_SJLJ
         static void fEntry(int signo) {
             Fiber *fiber = std::exchange(Fiber::that, nullptr);
-            assert(sigaction(signo, &fiber->old_sa, nullptr) == 0 && "Failed to reset signal handler");
+            if (::sigaction(signo, &fiber->old_sa, nullptr)) {
+                std::perror("Failed to reset signal handler");
+                std::abort();
+            }
             if (!::sigsetjmp(fiber->buf_new, 0)) {
                 ::siglongjmp(fiber->buf_main, 1);
             }

@@ -1,4 +1,4 @@
-#include "yield.hpp";
+#include "yield.hpp"
 
 using namespace std;
 using FiberSpace::Fiber;
