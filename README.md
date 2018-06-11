@@ -1,6 +1,10 @@
 # Cxx-Yield
 
-JavaScript Generator like header-only library written in C++.
+| macOS (clang++) / Linux (g++) | Windows (MinGW) |
+|-------------------------------|-----------------|
+| [![Build Status](https://travis-ci.org/CarterLi/Cxx-yield.svg?branch=master)](https://travis-ci.org/CarterLi/Cxx-yield) | [![Build Status](https://tea-ci.org/api/badges/CarterLi/Cxx-yield/status.svg)](https://tea-ci.org/CarterLi/Cxx-yield) |
+
+JavaScript [GeneratorFunction](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/function*) like header-only library written in C++.
 
 See `yield.hpp` for detail
 

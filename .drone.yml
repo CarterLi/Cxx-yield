@@ -11,7 +11,7 @@ build:
     - ./bootstrap.sh
     - ./b2 --with-context cxxflags=-std=c++14 address-model=$$arch
     - cd ../benchmark
-    - make CXX="g++ -DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -I../boost_1_67_0 -L../boost_1_67_0/stage/lib" LDFLAGS="-lboost_context-mgw54-mt-x$$arch-1_67"
+    - make CXXFLAGS="-DWINVER=0x0601 -D_WIN32_WINNT=0x0601 -I../boost_1_67_0 -L../boost_1_67_0/stage/lib" LDFLAGS="-lboost_context-mgw54-mt-x$$arch-1_67"
 
 matrix:
   arch:
