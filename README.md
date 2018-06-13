@@ -16,7 +16,7 @@ Doc: <https://www.boost.org/doc/libs/1_67_0/libs/context/doc/html/index.html>
 
 Best performance, best portability, but requires the HUGE boost library.
 
-Will use it when boost is detected. Pass `-lboost_context` or `-lboost_context-md` when linking.
+Will use it when boost is detected. Pass `-lboost_context` or `-lboost_context-mt` when linking.
 
 ### Windows fibers
 

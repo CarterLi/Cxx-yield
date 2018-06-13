@@ -9,7 +9,7 @@ Running on `MacBook Pro (Retina, 15-inch, Mid 2015)` and mobile phone `Xiaomi Mi
 
 Compiling on different platforms requires different command arguments. I have modified `Makefile` therefor.
 
-For clang, `-std=libc++ -lc++` is used.
+For clang, `-std=libc++ -lc++` is used. Note Don't use `-lc++abi` on Linux as `exception_ptr` is not yet implemented on Linux.
 
 ## Result
 
