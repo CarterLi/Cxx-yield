@@ -1,8 +1,10 @@
 /.vscode
 benchmark/createalot_fcontext
 benchmark/createalot_native
+benchmark/createalot_libaco
 benchmark/pingpang_fcontext
 benchmark/pingpang_native
+benchmark/pingpang_libaco
 a.out
 createalot_sjlj
 pingpang_sjlj

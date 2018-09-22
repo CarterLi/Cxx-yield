@@ -8,6 +8,8 @@
 #   else
 #       include <boost/context/protected_fixedsize_stack.hpp>
 #   endif
+#elif USE_LIBACO
+#   include "libaco/aco.h"
 #else
 #   if USE_WINFIB || (!defined(USE_WINFIB) && defined(_WIN32))
 #       undef USE_WINFIB
@@ -124,6 +126,10 @@ namespace FiberSpace {
         fctx::protected_fixedsize_stack stack_allocator;
 #endif
         fctx::stack_context fnew_stack;
+#elif USE_LIBACO
+        aco_share_stack_t* pNewStack;
+        aco_t* main_co;
+        aco_t* new_co;
 #elif USE_WINFIB
         PVOID pMainFiber, pNewFiber;
 #elif USE_UCONTEXT
@@ -147,6 +153,15 @@ namespace FiberSpace {
 #if USE_FCONTEXT
             this->fnew_stack = this->stack_allocator.allocate();
             this->ctx_fnew = fctx::detail::make_fcontext(this->fnew_stack.sp, this->fnew_stack.size, fEntry);
+#elif USE_LIBACO
+            this->main_co = aco_get_co();
+            if (!this->main_co) {
+                // WARNING: We won't destroy main_co for performance reasons
+                aco_thread_init(nullptr);
+                this->main_co = aco_create(nullptr, nullptr, 0, nullptr, nullptr);
+            }
+            this->pNewStack = aco_share_stack_new(SIGSTKSZ);
+            this->new_co = aco_create(this->main_co, this->pNewStack, 0, (aco_cofuncp_t)&fEntry, this);
 #elif USE_WINFIB
             if (!IsThreadAFiber()) {
                 // WARNING: We won't convert main fiber back to thread for performance reasons
@@ -226,6 +241,9 @@ namespace FiberSpace {
 
 #if USE_FCONTEXT
             this->stack_allocator.deallocate(this->fnew_stack);
+#elif USE_LIBACO
+            aco_destroy(this->new_co);
+            aco_share_stack_destroy(this->pNewStack);
 #elif USE_WINFIB
             ::DeleteFiber(this->pNewFiber);
 #endif
@@ -306,6 +324,8 @@ namespace FiberSpace {
 
 #if USE_FCONTEXT
             this->ctx_main = fctx::detail::jump_fcontext(this->ctx_main, this).fctx;
+#elif USE_LIBACO
+            aco_yield();
 #elif USE_WINFIB
             assert(GetCurrentFiber() != this->pMainFiber && "这虽然是游戏，但绝不是可以随便玩的");
             ::SwitchToFiber(this->pMainFiber);
@@ -329,6 +349,8 @@ namespace FiberSpace {
             assert(!isFinished());
 #if USE_FCONTEXT
             this->ctx_fnew = fctx::detail::jump_fcontext(this->ctx_fnew, this).fctx;
+#elif USE_LIBACO
+            aco_resume(this->new_co);
 #elif USE_WINFIB
             assert(GetCurrentFiber() != this->pNewFiber && "如果你想递归自己，请创建一个新纤程");
             ::SwitchToFiber(this->pNewFiber);
@@ -351,6 +373,9 @@ namespace FiberSpace {
         static void fEntry(fctx::detail::transfer_t transfer) {
             auto *fiber = static_cast<TrueFiberType *>(transfer.data);
             fiber->ctx_main = transfer.fctx;
+#elif USE_LIBACO
+        static void fEntry() {
+            auto *fiber = static_cast<TrueFiberType *>(aco_get_arg());
 #elif USE_WINFIB
         static void WINAPI fEntry(TrueFiberType *fiber) {
 #elif USE_UCONTEXT
@@ -383,6 +408,8 @@ namespace FiberSpace {
             fiber->resetValue();
 #if USE_FCONTEXT
             fiber->ctx_main = fctx::detail::jump_fcontext(fiber->ctx_main, fiber).fctx;
+#elif USE_LIBACO
+            aco_exit();
 #elif USE_WINFIB
             ::SwitchToFiber(fiber->pMainFiber);
 #elif USE_SJLJ

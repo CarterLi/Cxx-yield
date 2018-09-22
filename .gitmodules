@@ -1,0 +1,3 @@
+[submodule "libaco"]
+	path = libaco
+	url = https://github.com/CarterLi/libaco.git
