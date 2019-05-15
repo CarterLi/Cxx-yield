@@ -1,3 +1,4 @@
+#pragma once
 #if USE_FCONTEXT || (!defined(USE_FCONTEXT) && __has_include(<boost/context/detail/fcontext.hpp>))
 #   undef USE_FCONTEXT
 #   define USE_FCONTEXT 1
@@ -75,7 +76,7 @@ namespace FiberSpace {
      * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
      */
     struct FiberReturn {
-        template <typename, bool>
+        template <typename, bool, bool>
         friend class Fiber;
 
     private:
@@ -92,13 +93,14 @@ namespace FiberSpace {
      * \warning 线程安全（？）
      * \tparam ValueType 子纤程返回类型
      */
-    template <typename ValueType = void, bool = std::is_void<ValueType>::value>
+    template <typename ValueType = void, bool ReturnValue = false, bool = std::is_void_v<ValueType>>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
 
-        using TrueFiberType = Fiber<ValueType, std::is_void<ValueType>::value>;
-        using FuncType = std::function<void (TrueFiberType& fiber)>;
+        using TrueFiberType = Fiber<ValueType, ReturnValue, std::is_void_v<ValueType>>;
+        using ReturnType = std::conditional_t<ReturnValue, ValueType, void>;
+        using FuncType = std::function<ReturnType (TrueFiberType& fiber)>;
 
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
@@ -225,8 +227,15 @@ namespace FiberSpace {
                     (sizeof...(Args) > 0)
                 >::type
             >
-            explicit Fiber(Fp&& f, Args&&... args)
-                : Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {}
+        explicit Fiber(Fp&& f, Args&&... args)
+                : Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {
+            static_assert (std::is_invocable_v<Fp, Fiber<ValueType, ReturnValue>&, Args...>,
+                "Wrong callback argument type list or incompatible fiber type found");
+            static_assert (std::is_same_v<
+                std::invoke_result_t<Fp, Fiber<ValueType, ReturnValue>&, Args...>,
+                ReturnType
+            >, "Fp must returns the value type that you specified, or set set ReturnValue = false");
+        }
 
         /** \brief 析构函数
          *
@@ -305,7 +314,7 @@ namespace FiberSpace {
         }
 
         void resetValue() {
-            static_assert(std::is_void<ValueType>::value, "Should use `trueThis` to get *true* this type");
+            static_assert(std::is_void_v<ValueType>, "Should use `trueThis` to get *true* this type");
         }
 
         TrueFiberType *trueThis() noexcept {
@@ -395,7 +404,12 @@ namespace FiberSpace {
             if (!fiber->eptr) {
                 fiber->status = FiberStatus::running;
                 try {
-                    fiber->func(*fiber);
+                    if constexpr (ReturnValue) {
+                        fiber->resetValue(fiber->func(*fiber));
+                    } else {
+                        fiber->func(*fiber);
+                        fiber->resetValue();
+                    }
                 }
                 catch (FiberReturn &) {
                     // 主 Fiber 对象正在析构
@@ -405,7 +419,6 @@ namespace FiberSpace {
                 }
             }
             fiber->status = FiberStatus::closed;
-            fiber->resetValue();
 #if USE_FCONTEXT
             fiber->ctx_main = fctx::detail::jump_fcontext(fiber->ctx_main, fiber).fctx;
 #elif USE_LIBACO
@@ -419,25 +432,25 @@ namespace FiberSpace {
     };
 
 #if USE_SJLJ
-    template <typename ValueType, bool IsVoid>
-    void *Fiber<ValueType, IsVoid>::that;
+    template <typename ValueType, bool ReturnValue, bool IsVoid>
+    void *Fiber<ValueType, ReturnValue, IsVoid>::that;
 #endif
 
-    template <typename ValueType>
-    class Fiber<ValueType, false>: public Fiber<ValueType, true> {
-        static_assert(std::is_object<ValueType>::value, "Non-object type won't work");
+    template <typename ValueType, bool ReturnValue>
+    class Fiber<ValueType, ReturnValue, false>: public Fiber<ValueType, ReturnValue, true> {
+        static_assert(std::is_object_v<ValueType>, "Non-object type won't work");
 
         /// \brief 子纤程返回值
         std::optional<ValueType> currentValue;
 
     public:
-        using Fiber<ValueType, true>::Fiber;
-        using Fiber<ValueType, true>::isFinished;
-        using Fiber<ValueType, true>::yield;
-        using Fiber<ValueType, true>::next;
+        using Fiber<ValueType, ReturnValue, true>::Fiber;
+        using Fiber<ValueType, ReturnValue, true>::isFinished;
+        using Fiber<ValueType, ReturnValue, true>::yield;
+        using Fiber<ValueType, ReturnValue, true>::next;
 
-        void resetValue() {
-            this->currentValue = std::nullopt;
+        void resetValue(std::optional<ValueType> value = std::nullopt) {
+            this->currentValue = std::move(value);
         }
 
         /** \brief 调用子纤程
@@ -501,7 +514,7 @@ namespace FiberSpace {
      * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
      * 用于 C++11 for (... : ...)
      */
-    template <typename ValueType, std::enable_if_t<std::is_object<ValueType>::value, int> = 0>
+    template <typename ValueType, std::enable_if_t<std::is_object_v<ValueType>, int> = 0>
     struct FiberIterator : std::iterator<std::output_iterator_tag, ValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}
