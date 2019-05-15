@@ -53,15 +53,8 @@
 #include <memory>
 #include <algorithm>
 #include <type_traits>
-#if __has_include(<optional>)
-#   include <optional>
-#else
-#   include <experimental/optional> // Apple Clang doesn't support std::optional (yet)
-namespace std {
-    using ::std::experimental::optional;
-    using ::std::experimental::nullopt; // std::experimental::optional doesn't support reset
-}
-#endif
+#include <optional>
+#include <any>
 
 namespace FiberSpace {
     enum class FiberStatus {
@@ -76,7 +69,7 @@ namespace FiberSpace {
      * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
      */
     struct FiberReturn {
-        template <typename, bool, bool>
+        template <typename, bool>
         friend class Fiber;
 
     private:
@@ -93,14 +86,13 @@ namespace FiberSpace {
      * \warning 线程安全（？）
      * \tparam ValueType 子纤程返回类型
      */
-    template <typename ValueType = void, bool ReturnValue = false, bool = std::is_void_v<ValueType>>
+    template <typename ValueType = std::any, bool ReturnValue = false>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
 
-        using TrueFiberType = Fiber<ValueType, ReturnValue, std::is_void_v<ValueType>>;
         using ReturnType = std::conditional_t<ReturnValue, ValueType, void>;
-        using FuncType = std::function<ReturnType (TrueFiberType& fiber)>;
+        using FuncType = std::function<ReturnType (Fiber& fiber)>;
 
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
@@ -143,6 +135,11 @@ namespace FiberSpace {
         struct sigaction old_sa;
         static void *that;
 #endif
+
+        static_assert(std::is_object_v<ValueType>, "Non-object type won't work");
+
+        /// \brief 子纤程返回值
+        std::optional<ValueType> currentValue;
 
     public:
         /** \brief 构造函数
@@ -258,19 +255,6 @@ namespace FiberSpace {
 #endif
         }
 
-        /** \brief 调用子纤程
-         *
-         * 程序流程转入子纤程
-         *
-         * \warning 子纤程必须尚未结束
-         * \return 返回子纤程是否尚未结束
-         */
-        bool next() {
-            trueThis()->resetValue();
-            this->jumpNew();
-            return !isFinished();
-        }
-
         /** \brief 向子纤程内部抛出异常
          *
          * 程序流程转入子纤程，并在子纤程内部抛出异常
@@ -304,25 +288,63 @@ namespace FiberSpace {
             return this->status == FiberStatus::closed;
         }
 
-        /** \brief 转回主纤程并但不输出值
+        void resetValue(std::optional<ValueType> value = std::nullopt) {
+            this->currentValue = std::move(value);
+        }
+
+        /** \brief 调用子纤程
+         *
+         * 程序流程转入子纤程，并传入值（可通过 current() 获取）
+         *
+         * \param value 传入子纤程的值
+         * \warning 子纤程必须尚未结束
+         * \return 返回子纤程是否尚未结束
+         */
+        bool next(std::optional<ValueType> value = std::nullopt) {
+            this->currentValue = std::move(value);
+            this->jumpNew();
+            return !isFinished();
+        }
+
+        /** \brief 获得子纤程返回的值
+         * \warning 可能为空（nullopt）
+         * \return 子纤程返回的值
+         */
+        const auto& current() const noexcept {
+            return this->currentValue;
+        }
+
+        /** \brief 获得子纤程返回的值
+         * \warning 可能为空（nullopt）
+         * \return 子纤程返回的值
+         */
+        auto&& current() noexcept {
+            return this->currentValue;
+        }
+
+        /** \brief 转回主纤程并输出值
          *
          * \warning 必须由子纤程调用
+         *          参数类型必须与子纤程返回值相同，无类型安全
+         * \param value 输出到主纤程的值
          */
-        void yield() {
-            trueThis()->resetValue();
+        void yield(std::optional<ValueType> value = std::nullopt) {
+            this->currentValue = std::move(value);
             this->jumpMain();
         }
 
-        void resetValue() {
-            static_assert(std::is_void_v<ValueType>, "Should use `trueThis` to get *true* this type");
+        /** \brief 输出子纤程的所有值
+         * \param fiber 另一子纤程
+         */
+        void yieldAll(Fiber& fiber) {
+            assert(&fiber != this);
+            while (fiber.next()) {
+                this->yield(*fiber.current());
+            }
         }
 
-        TrueFiberType *trueThis() noexcept {
-            return static_cast<TrueFiberType *>(this);
-        }
-
-        TrueFiberType *trueThis() const noexcept {
-            return static_cast<const TrueFiberType *>(this);
+        void yieldAll(Fiber&& fiber) {
+            this->yieldAll(fiber);
         }
 
     protected:
@@ -380,18 +402,18 @@ namespace FiberSpace {
         /// \brief 子纤程入口的warpper
 #if USE_FCONTEXT
         static void fEntry(fctx::detail::transfer_t transfer) {
-            auto *fiber = static_cast<TrueFiberType *>(transfer.data);
+            auto *fiber = static_cast<Fiber *>(transfer.data);
             fiber->ctx_main = transfer.fctx;
 #elif USE_LIBACO
         static void fEntry() {
-            auto *fiber = static_cast<TrueFiberType *>(aco_get_arg());
+            auto *fiber = static_cast<Fiber *>(aco_get_arg());
 #elif USE_WINFIB
-        static void WINAPI fEntry(TrueFiberType *fiber) {
+        static void WINAPI fEntry(Fiber *fiber) {
 #elif USE_UCONTEXT
-        static void fEntry(TrueFiberType *fiber) {
+        static void fEntry(Fiber *fiber) {
 #elif USE_SJLJ
         static void fEntry(int signo) {
-            auto *fiber = static_cast<TrueFiberType *>(std::exchange(Fiber::that, nullptr));
+            auto *fiber = static_cast<Fiber *>(std::exchange(Fiber::that, nullptr));
             if (::sigaction(signo, &fiber->old_sa, nullptr)) {
                 std::perror("Failed to reset signal handler");
                 std::abort();
@@ -413,6 +435,7 @@ namespace FiberSpace {
                 }
                 catch (FiberReturn &) {
                     // 主 Fiber 对象正在析构
+		    fiber->resetValue();
                 }
                 catch (...) {
                     fiber->eptr = std::current_exception();
@@ -432,89 +455,16 @@ namespace FiberSpace {
     };
 
 #if USE_SJLJ
-    template <typename ValueType, bool ReturnValue, bool IsVoid>
-    void *Fiber<ValueType, ReturnValue, IsVoid>::that;
-#endif
-
     template <typename ValueType, bool ReturnValue>
-    class Fiber<ValueType, ReturnValue, false>: public Fiber<ValueType, ReturnValue, true> {
-        static_assert(std::is_object_v<ValueType>, "Non-object type won't work");
-
-        /// \brief 子纤程返回值
-        std::optional<ValueType> currentValue;
-
-    public:
-        using Fiber<ValueType, ReturnValue, true>::Fiber;
-        using Fiber<ValueType, ReturnValue, true>::isFinished;
-        using Fiber<ValueType, ReturnValue, true>::yield;
-        using Fiber<ValueType, ReturnValue, true>::next;
-
-        void resetValue(std::optional<ValueType> value = std::nullopt) {
-            this->currentValue = std::move(value);
-        }
-
-        /** \brief 调用子纤程
-         *
-         * 程序流程转入子纤程，并传入值（可通过 current() 获取）
-         *
-         * \param value 传入子纤程的值
-         * \warning 子纤程必须尚未结束
-         * \return 返回子纤程是否尚未结束
-         */
-        bool next(ValueType value) {
-            this->currentValue = std::move(value);
-            this->jumpNew();
-            return !isFinished();
-        }
-
-        /** \brief 获得子纤程返回的值
-         * \warning 可能为空（nullopt）
-         * \return 子纤程返回的值
-         */
-        const auto& current() const noexcept {
-            return this->currentValue;
-        }
-
-        /** \brief 获得子纤程返回的值
-         * \warning 可能为空（nullopt）
-         * \return 子纤程返回的值
-         */
-        auto&& current() noexcept {
-            return this->currentValue;
-        }
-
-        /** \brief 转回主纤程并输出值
-         *
-         * \warning 必须由子纤程调用
-         *          参数类型必须与子纤程返回值相同，无类型安全
-         * \param value 输出到主纤程的值
-         */
-        void yield(ValueType value) {
-            this->currentValue = std::move(value);
-            this->jumpMain();
-        }
-
-        /** \brief 输出子纤程的所有值
-         * \param fiber 另一子纤程
-         */
-        void yieldAll(Fiber& fiber) {
-            assert(&fiber != this);
-            while (fiber.next()) {
-                this->yield(*fiber.current());
-            }
-        }
-
-        void yieldAll(Fiber&& fiber) {
-            this->yieldAll(fiber);
-        }
-    };
+    void *Fiber<ValueType, ReturnValue>::that;
+#endif
 
     /** \brief 纤程迭代器类
      *
      * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
      * 用于 C++11 for (... : ...)
      */
-    template <typename ValueType, std::enable_if_t<std::is_object_v<ValueType>, int> = 0>
+    template <typename ValueType>
     struct FiberIterator : std::iterator<std::output_iterator_tag, ValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}

@@ -14,7 +14,7 @@ struct TestDestruct {
     }
 };
 
-void foo(Fiber<void>& fiber, int arg) {
+void foo(Fiber<>& fiber, int arg) {
     TestDestruct test;
     for (int i = 1; i < 5; i++) {
         printf("goroutine :%d\n", arg + i);
