@@ -3,13 +3,16 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
-#include <cerrno>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
-#include <cstdio>
-#include <string>
+#include <cerrno>
 #include <cstring>
+#include <string>
 #include <string_view>
-#include <liburing.h>
+#include <system_error>
+#include <liburing.h>   // http://git.kernel.dk/liburing
+#include <fmt/format.h> // https://github.com/fmtlib/fmt
+
 #include "yield.hpp"
 
 #define BUF_LEN 1024
@@ -18,6 +21,7 @@
 using namespace FiberSpace;
 using namespace std::literals;
 
+// 用coroutine包装异步操作
 #define DEFINE_URING_OP(operation) \
 template <unsigned int N, typename FiberType> \
 int await_io_uring_ ## operation (FiberType& fiber, io_uring* ring, int fd, iovec (&&ioves) [N], off_t offset = 0) { \
@@ -26,12 +30,15 @@ int await_io_uring_ ## operation (FiberType& fiber, io_uring* ring, int fd, iove
     io_uring_sqe_set_data(sqe, &fiber); \
     io_uring_submit(ring); \
     fiber.yield(); \
-    return fiber.current().value(); \
+    int res = fiber.current().value(); \
+    if (res <= 0) throw std::system_error(errno, std::generic_category()); \
+    return res; \
 }
 
 DEFINE_URING_OP(readv)
 DEFINE_URING_OP(writev)
 
+// 用 string_view（string, char *）填充 iovec 结构体
 inline iovec to_iov(std::string_view sv, size_t len = size_t(-1)) {
     return {
         .iov_base = const_cast<char *>(sv.data()),
@@ -39,36 +46,34 @@ inline iovec to_iov(std::string_view sv, size_t len = size_t(-1)) {
     };
 }
 
-// 定义好的html页面，实际情况下web server基本是从本地文件系统读取html文件
-static const auto http_error_hdr = "HTTP/1.1 404 Not Found\r\nContent-type: text/html\r\n\r\n"sv;
-static const auto http_html_hdr = "HTTP/1.1 200 OK\r\nContent-type: text/html\r\n\r\n"sv;
-static const auto http_index_html =
-"<!doctype html><meta charset='utf-8'><title>Congrats!</title>"
-"<h1>Welcome to our HTTP server demo!</h1>"
-"<p>This is a just small test page.</p>\n"sv;
+// 一些预定义的错误返回体
+static const auto http_404_hdr = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"sv;
+static const auto http_400_hdr = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"sv;
 
 // 解析到HTTP请求的文件后，发送本地文件系统中的文件
-// 这里，我们处理对index文件的请求，发送我们预定好的html文件
-// 呵呵，一切从简！
-void http_send_file(Fiber<int, true>& fiber, io_uring* ring, std::string_view filename, int sockfd) {
-    int res;
-    if (filename == "/") {
-        // 通过write函数发送http响应报文；报文包括HTTP响应头和响应内容--HTML文件
-        res = await_io_uring_writev(fiber, ring, sockfd, {
-            to_iov(http_html_hdr),
-            to_iov(http_index_html),
-        });
-    } else {
-        // 文件未找到情况下发送404error响应
-        std::printf("%.*s: file not find!\n", int(filename.size()), filename.data());
-        res = await_io_uring_writev(fiber, ring, sockfd, { to_iov(http_error_hdr) });
-    }
+void http_send_file(Fiber<int, true>& fiber, io_uring* ring, const std::string& filename, int sockfd) {
+    // 尝试打开待发送文件
+    const auto infd = open(filename.c_str(), O_RDONLY);
+    struct stat st;
 
-    if (res <= 0) {
-        perror("writev");
-        if (errno == EAGAIN) {
-            return http_send_file(fiber, ring, filename, sockfd); // tail call
-        }
+    if (infd < 0 || fstat(infd, &st) < 0|| !S_ISREG(st.st_mode)) {
+        // 文件未找到情况下发送404 error响应
+        fmt::print("{}: file not found!\n", filename);
+        await_io_uring_writev(fiber, ring, sockfd, { to_iov(http_404_hdr) });
+        close(infd);
+    } else {
+        // 读取文件内容
+        std::string filebuf(uint64_t(st.st_size), '\0');
+        auto iov = to_iov(filebuf);
+
+        await_io_uring_readv(fiber, ring, infd, { iov });
+        close(infd);
+
+        // 发送文件内容
+        await_io_uring_writev(fiber, ring, sockfd, {
+            to_iov(fmt::format("HTTP/1.1 200 OK\r\nContent-type: text/plain\r\nContent-Length: {}\r\n\r\n", st.st_size)),
+            iov,
+        });
     }
 }
 
@@ -76,26 +81,20 @@ void http_send_file(Fiber<int, true>& fiber, io_uring* ring, std::string_view fi
 int serve(Fiber<int, true>& fiber, io_uring* ring, int sockfd) {
     char buf[BUF_LEN];
 
-retry:
     int res = await_io_uring_readv(fiber, ring, sockfd, { to_iov(buf, sizeof (buf)) });
-    if (res <= 0) {
-        perror("readv");
-        if (errno == EAGAIN) {
-            goto retry;
-        } else {
-            return sockfd;
-        }
-    }
 
     std::string_view buf_view(buf, size_t(res));
 
-    if (buf_view.compare(0, 3, "GET"sv) == 0) {
-        auto file = buf_view.substr(4, buf_view.find(' ', 4) - 4);
-        std::printf("received request: %.*s\n", int(file.size()), file.data());
+    // 这里我们只处理GET请求
+    if (buf_view.compare(0, 3, "GET") == 0) {
+        // 获取请求的path
+        auto file = std::string(buf_view.substr(4, buf_view.find(' ', 4) - 4));
+        fmt::print("received request: {}\n", file);
         http_send_file(fiber, ring, file, sockfd);
     } else {
-        // 其他HTTP请求处理，如POST，HEAD等 。这里我们只处理GET
-        std::printf("unsupported request: %.*s\n", int(buf_view.size()), buf_view.data());
+        // 其他HTTP请求处理，如POST，HEAD等，返回400错误
+        fmt::print("unsupported request: %.*s\n", buf_view);
+        await_io_uring_writev(fiber, ring, sockfd, { to_iov(http_400_hdr) });
     }
     return sockfd;
 }
@@ -121,8 +120,9 @@ int main() {
         .sin_addr = {
             .s_addr = INADDR_ANY,
         },
-        .sin_zero = {}, // Avoid compiler warning
+        .sin_zero = {}, // 消除编译器警告
     };
+    // 绑定端口
     if (bind(sockfd, reinterpret_cast<sockaddr *>(&addr), sizeof (sockaddr_in))) {
         std::perror("socket binding failed!\n");
         return 1;
@@ -131,12 +131,17 @@ int main() {
         std::perror("listen failed!\n");
         return 1;
     }
+    fmt::print("Listening: {}\n", SERVER_PORT);
+    const auto cleanFiber = [] (Fiber<int, true>* fiber) {
+        close(fiber->current().value());
+        delete fiber;
+    };
     for (;;) {
         // 不间断接收HTTP请求并处理
         if (int newfd = accept(sockfd, nullptr, nullptr); newfd >= 0) {
             // 开始新协程处理请求
             auto* fiber = new Fiber<int, true>(serve, &ring, newfd);
-            fiber->next();
+            if (!fiber->next()) cleanFiber(fiber);
         } else {
             // 获取已完成的IO事件
             io_uring_cqe* cqe;
@@ -147,10 +152,7 @@ int main() {
             if (cqe) {
                 auto* fiber = static_cast<Fiber<int, true> *>(io_uring_cqe_get_data(cqe));
                 io_uring_cqe_seen(&ring, cqe);
-                if (!fiber->next(cqe->res)) {
-                    close(fiber->current().value());
-                    delete fiber;
-                }
+                if (fiber && !fiber->next(cqe->res)) cleanFiber(fiber);
             }
         }
     }
