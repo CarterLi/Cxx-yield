@@ -69,7 +69,7 @@ namespace FiberSpace {
      * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
      */
     struct FiberReturn {
-        template <typename, bool>
+        template <typename, typename, bool>
         friend class Fiber;
 
     private:
@@ -86,7 +86,7 @@ namespace FiberSpace {
      * \warning 线程安全（？）
      * \tparam ValueType 子纤程返回类型
      */
-    template <typename ValueType = std::any, bool ReturnValue = false>
+    template <typename ValueType = std::any, typename FiberStorageType = std::any, bool ReturnValue = false>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
@@ -226,12 +226,12 @@ namespace FiberSpace {
             >
         explicit Fiber(Fp&& f, Args&&... args)
                 : Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {
-            static_assert (std::is_invocable_v<Fp, Fiber<ValueType, ReturnValue>&, Args...>,
+            static_assert (std::is_invocable_v<Fp, Fiber<ValueType, FiberStorageType, ReturnValue>&, Args...>,
                 "Wrong callback argument type list or incompatible fiber type found");
             static_assert (std::is_same_v<
-                std::invoke_result_t<Fp, Fiber<ValueType, ReturnValue>&, Args...>,
+                std::invoke_result_t<Fp, Fiber<ValueType, FiberStorageType, ReturnValue>&, Args...>,
                 ReturnType
-            >, "Fp must returns the value type that you specified, or set set ReturnValue = false");
+            >, "Fp must returns the value type that you specified, or set ReturnValue = false");
         }
 
         /** \brief 析构函数
@@ -435,7 +435,7 @@ namespace FiberSpace {
                 }
                 catch (FiberReturn &) {
                     // 主 Fiber 对象正在析构
-		    fiber->resetValue();
+                    fiber->resetValue();
                 }
                 catch (...) {
                     fiber->eptr = std::current_exception();
@@ -452,6 +452,10 @@ namespace FiberSpace {
             ::siglongjmp(fiber->buf_main, 1);
 #endif
         }
+
+    public:
+        /// \brief 纤程本地存储
+        FiberStorageType localData;
     };
 
 #if USE_SJLJ
