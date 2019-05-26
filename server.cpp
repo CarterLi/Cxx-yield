@@ -204,7 +204,7 @@ void serve(Fiber<int, fiber_data>& fiber) {
         http_send_file(fiber, file);
     } else {
         // 其他HTTP请求处理，如POST，HEAD等，返回400错误
-        fmt::print("unsupported request: %.*s\n", buf_view);
+        fmt::print("unsupported request: {}\n", buf_view);
         await_writev(fiber, sockfd, { to_iov(http_400_hdr) });
     }
 }
