@@ -18,6 +18,12 @@ Best performance, best portability, but requires the HUGE boost library.
 
 Will use it when boost is detected. Pass `-lboost_context` or `-lboost_context-mt` when linking.
 
+### libaco
+
+Doc: <https://github.com/hnes/libaco>
+
+Good performance, good portability (x86 only), source code included
+
 ### Windows fibers
 
 Doc: <https://msdn.microsoft.com/en-us/library/windows/desktop/ms682661(v=vs.85).aspx>

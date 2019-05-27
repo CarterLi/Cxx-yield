@@ -69,7 +69,7 @@ namespace FiberSpace {
      * \warning 用户代码吃掉此异常可导致未定义行为。如果捕获到此异常，请转抛出去。
      */
     struct FiberReturn {
-        template <typename, typename, bool>
+        template <typename, typename>
         friend class Fiber;
 
     private:
@@ -85,14 +85,14 @@ namespace FiberSpace {
      *
      * \warning 线程安全（？）
      * \tparam ValueType 子纤程返回类型
+     * \tparam ValueType 纤程本地存储变量类型
      */
-    template <typename ValueType = std::any, typename FiberStorageType = std::any, bool ReturnValue = false>
+    template <typename ValueType = std::any, typename FiberStorageType = std::any>
     class Fiber {
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
 
-        using ReturnType = std::conditional_t<ReturnValue, ValueType, void>;
-        using FuncType = std::function<ReturnType (Fiber& fiber)>;
+        using FuncType = std::function<void (Fiber& fiber)>;
 
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
@@ -133,7 +133,7 @@ namespace FiberSpace {
         ::sigjmp_buf buf_main, buf_new;
         const std::unique_ptr<StackBuf> fnew_stack = std::make_unique<StackBuf>();
         struct sigaction old_sa;
-        static void *that;
+        thread_local void *that;
 #endif
 
         static_assert(std::is_object_v<ValueType>, "Non-object type won't work");
@@ -226,12 +226,8 @@ namespace FiberSpace {
             >
         explicit Fiber(Fp&& f, Args&&... args)
                 : Fiber(std::bind(std::forward<Fp>(f), std::placeholders::_1, std::forward<Args>(args)...)) {
-            static_assert (std::is_invocable_v<Fp, Fiber<ValueType, FiberStorageType, ReturnValue>&, Args...>,
+            static_assert (std::is_invocable_v<Fp, Fiber<ValueType, FiberStorageType>&, Args...>,
                 "Wrong callback argument type list or incompatible fiber type found");
-            static_assert (std::is_same_v<
-                std::invoke_result_t<Fp, Fiber<ValueType, FiberStorageType, ReturnValue>&, Args...>,
-                ReturnType
-            >, "Fp must returns the value type that you specified, or set ReturnValue = false");
         }
 
         /** \brief 析构函数
@@ -288,6 +284,10 @@ namespace FiberSpace {
             return this->status == FiberStatus::closed;
         }
 
+        /** \brief 重置当前值（currentValue）
+         *
+         * 也可以用来作为纤程返回值
+         */
         void resetValue(std::optional<ValueType> value = std::nullopt) {
             this->currentValue = std::move(value);
         }
@@ -426,16 +426,10 @@ namespace FiberSpace {
             if (!fiber->eptr) {
                 fiber->status = FiberStatus::running;
                 try {
-                    if constexpr (ReturnValue) {
-                        fiber->resetValue(fiber->func(*fiber));
-                    } else {
-                        fiber->func(*fiber);
-                        fiber->resetValue();
-                    }
+                    fiber->func(*fiber);
                 }
                 catch (FiberReturn &) {
                     // 主 Fiber 对象正在析构
-                    fiber->resetValue();
                 }
                 catch (...) {
                     fiber->eptr = std::current_exception();
@@ -459,8 +453,8 @@ namespace FiberSpace {
     };
 
 #if USE_SJLJ
-    template <typename ValueType, bool ReturnValue>
-    void *Fiber<ValueType, ReturnValue>::that;
+    template <typename ValueType, typename FiberStorageType>
+    void *Fiber<ValueType, FiberStorageType>::that;
 #endif
 
     /** \brief 纤程迭代器类
@@ -468,14 +462,14 @@ namespace FiberSpace {
      * 它通过使用 yield 函数对数组或集合类执行自定义迭代。
      * 用于 C++11 for (... : ...)
      */
-    template <typename ValueType>
+    template <typename ValueType, typename FiberStorageType>
     struct FiberIterator : std::iterator<std::output_iterator_tag, ValueType> {
         /// \brief 迭代器尾
         FiberIterator() noexcept : fiber(nullptr) {}
         /** \brief 迭代器首
          * \param _f 主线程类的引用
          */
-        FiberIterator(Fiber<ValueType>& _f) : fiber(&_f) {
+        FiberIterator(Fiber<ValueType, FiberStorageType>& _f) : fiber(&_f) {
             next();
         }
 
@@ -513,14 +507,14 @@ namespace FiberSpace {
     };
 
     /// \brief 返回迭代器首
-    template <typename ValueType>
-    FiberIterator<ValueType> begin(Fiber<ValueType>& fiber) {
-        return FiberIterator<ValueType>(fiber);
+    template <typename ValueType, typename FiberStorageType>
+    auto begin(Fiber<ValueType, FiberStorageType>& fiber) {
+        return FiberIterator<ValueType, FiberStorageType>(fiber);
     }
 
     /// \brief 返回迭代器尾
-    template <typename ValueType>
-    FiberIterator<ValueType> end(Fiber<ValueType>&) noexcept {
-        return FiberIterator<ValueType>();
+    template <typename ValueType, typename FiberStorageType>
+    auto end(Fiber<ValueType, FiberStorageType>&) noexcept {
+        return FiberIterator<ValueType, FiberStorageType>();
     }
 }
