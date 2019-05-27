@@ -90,15 +90,6 @@ int yield_execution(Fiber<int, fiber_data>& fiber) {
     return fiber.current().value();
 }
 
-// 判断循环队列 io_uring 是否已满
-bool is_uring_full(io_uring* ring) {
-    // Copied from: io_uring_get_sqe
-    io_uring_sq *sq = &ring->sq;
-    unsigned next = sq->sqe_tail + 1;
-
-    return next - sq->sqe_head > *sq->kring_entries;
-}
-
 // 填充 iovec 结构体
 constexpr inline iovec to_iov(char *buf, size_t size) {
     return {
@@ -269,11 +260,11 @@ int main() {
     sigHandler.sa_handler = [](int) { exit_flag = 1; };
     if (sigaction(SIGINT, &sigHandler, nullptr)) panic("sigaction");
 
+    // 事件循环
     while (!exit_flag) {
         // 获取已完成的IO事件
         io_uring_cqe* cqe;
-        // 当判断缓冲区列表已满时，阻塞等待IO事件，以确保sqe总是可用
-        if (!is_uring_full(&ring) ? io_uring_peek_cqe(&ring, &cqe) : io_uring_wait_cqe(&ring, &cqe)) panic("peek/wait_cqe");
+        if (io_uring_peek_cqe(&ring, &cqe)) panic("peek/wait_cqe");
 
         if (cqe) {
             // 有已完成的事件，回到协程继续
