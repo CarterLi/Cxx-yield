@@ -1,4 +1,3 @@
-// https://blog.csdn.net/ruizeng88/article/details/6682028
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -39,6 +38,7 @@ struct fiber_data {
     pool_ptr_t pool_ptr;
     std::chrono::time_point<std::chrono::high_resolution_clock> start;
     int clientfd;
+    int dirfd;
 };
 
 // 异步读操作，不使用缓冲区
@@ -92,10 +92,7 @@ int yield_execution(Fiber<int, fiber_data>& fiber) {
 
 // 填充 iovec 结构体
 constexpr inline iovec to_iov(char *buf, size_t size) {
-    return {
-        .iov_base = buf,
-        .iov_len = size,
-    };
+    return { buf, size };
 }
 constexpr inline iovec to_iov(std::string_view sv) {
     return to_iov(const_cast<char *>(sv.data()), sv.size());
@@ -115,14 +112,14 @@ private:
 };
 
 // 一些预定义的错误返回体
-static const auto http_404_hdr = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"sv;
-static const auto http_400_hdr = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"sv;
+static constexpr auto http_404_hdr = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"sv;
+static constexpr auto http_400_hdr = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"sv;
 
 // 解析到HTTP请求的文件后，发送本地文件系统中的文件
 void http_send_file(Fiber<int, fiber_data>& fiber, const std::string& filename) {
     const auto sockfd = fiber.localData.clientfd;
     // 尝试打开待发送文件
-    const auto infd = open(filename.c_str(), O_RDONLY);
+    const auto infd = openat(fiber.localData.dirfd, filename.c_str(), O_RDONLY);
     on_scope_exit closefd([=]() { close(infd); });
 
     if (struct stat st; infd < 0 || fstat(infd, &st) || !S_ISREG(st.st_mode)) {
@@ -140,10 +137,6 @@ void http_send_file(Fiber<int, fiber_data>& fiber, const std::string& filename) 
             for (; st.st_size - offset > BUF_SIZE; offset += BUF_SIZE) {
                 await_read_fixed(fiber, infd, BUF_SIZE, offset);
                 await_write_fixed(fiber, sockfd, BUF_SIZE);
-
-                // for (int i = 0; i < 100000; ++i) {
-                //     yield_execution(fiber);
-                // }
             }
             // 读取剩余数据并发送
             if (st.st_size > offset) {
@@ -156,10 +149,6 @@ void http_send_file(Fiber<int, fiber_data>& fiber, const std::string& filename) 
             for (; st.st_size - offset > BUF_SIZE; offset += BUF_SIZE) {
                 await_readv(fiber, infd, { iov }, offset);
                 await_writev(fiber, sockfd, { iov });
-
-                // for (int i = 0; i < 100000; ++i) {
-                //     yield_execution(fiber);
-                // }
             }
             if (st.st_size > offset) {
                 iov.iov_len = size_t(st.st_size - offset);
@@ -190,7 +179,7 @@ void serve(Fiber<int, fiber_data>& fiber) {
     // 这里我们只处理GET请求
     if (buf_view.compare(0, 3, "GET") == 0) {
         // 获取请求的path
-        auto file = std::string(buf_view.substr(4, buf_view.find(' ', 4) - 4));
+        auto file = "."s += buf_view.substr(4, buf_view.find(' ', 4) - 4);
         fmt::print("received request {} with sockfd {}\n", file, sockfd);
         http_send_file(fiber, file);
     } else {
@@ -200,7 +189,16 @@ void serve(Fiber<int, fiber_data>& fiber) {
     }
 }
 
-int main() {
+int main(int argc, char* argv[]) {
+    if (argc != 2 || std::string_view(argv[1]) == "-h") {
+        fmt::print("Usage: {} <ROOT_DIR>\n", argv[0]);
+        return 1;
+    }
+
+    int dirfd = open(argv[1], O_DIRECTORY);
+    if (dirfd < 0) panic("open dir");
+    on_scope_exit closedir([=]() { close(dirfd); });
+
     // 初始化IO循环队列，内核支持的原生异步操作实现
     io_uring ring;
     if (io_uring_queue_init(MAX_CONNECTION_NUM, &ring, 0)) panic("queue_init");
@@ -225,13 +223,11 @@ int main() {
     on_scope_exit closesock([=]() { close(sockfd); });
 
     sockaddr_in addr = {
-        .sin_family = AF_INET,
+        AF_INET,
         // 这里要注意，端口号一定要使用htons先转化为网络字节序，否则绑定的实际端口可能和你需要的不同
-        .sin_port = htons(SERVER_PORT),
-        .sin_addr = {
-            .s_addr = INADDR_ANY,
-        },
-        .sin_zero = {}, // 消除编译器警告
+        htons(SERVER_PORT),
+        { INADDR_ANY },
+        {}, // 消除编译器警告
     };
     // 绑定端口
     if (bind(sockfd, reinterpret_cast<sockaddr *>(&addr), sizeof (sockaddr_in))) panic("socket binding");
@@ -242,13 +238,14 @@ int main() {
     const auto cleanFiber = [&] (Fiber<int, fiber_data>* fiber) {
         // 请求结束时清理资源
         close(fiber->localData.clientfd);
+        pool_ptr_t ppool = fiber->localData.pool_ptr;
         fmt::print("sockfd {} is closed, time used {}, with pool {}\n",
             fiber->localData.clientfd,
             (std::chrono::high_resolution_clock::now() - fiber->localData.start).count(),
-            (void *)fiber->localData.pool_ptr);
-        if (fiber->localData.pool_ptr) {
+            static_cast<void *>(ppool));
+        if (ppool) {
             // 将缓冲区重新放入可用列表
-            available_buffers.push_back(fiber->localData.pool_ptr);
+            available_buffers.push_back(ppool);
         }
         delete fiber;
     };
@@ -277,22 +274,21 @@ int main() {
                 // 新建新协程处理请求
                 auto* fiber = new Fiber<int, fiber_data>(serve);
                 // 注册必要数据，这个数据对整个协程都可用
+                pool_ptr_t ppool = nullptr;
+                if (!available_buffers.empty()) {
+                    // 如果池中有可用的缓冲区，使用之
+                    ppool = available_buffers.back();
+                    available_buffers.pop_back();
+                }
                 fiber->localData = {
-                    .ring = &ring,
-                    .pool_start_ptr = buffers.data(),
-                    .pool_ptr = [&]() {
-                        pool_ptr_t result = nullptr;
-                        if (!available_buffers.empty()) {
-                            // 如果池中有可用的缓冲区，使用之
-                            result = available_buffers.back();
-                            available_buffers.pop_back();
-                        }
-                        return result;
-                    }(),
-                    .start = std::chrono::high_resolution_clock::now(),
-                    .clientfd = newfd,
+                    &ring,
+                    buffers.data(),
+                    ppool,
+                    std::chrono::high_resolution_clock::now(),
+                    newfd,
+                    dirfd,
                 };
-                fmt::print("Accepting connection, sockfd {} with pool: {}\n", newfd, (void *)fiber->localData.pool_ptr);
+                fmt::print("Accepting connection, sockfd {} with pool: {}\n", newfd, static_cast<void *>(ppool));
                 // 进入协程开始处理请求
                 if (!fiber->next()) cleanFiber(fiber);
             }
