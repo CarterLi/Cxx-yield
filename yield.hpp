@@ -89,10 +89,12 @@ namespace FiberSpace {
      */
     template <typename ValueType = std::any, typename FiberStorageType = std::any>
     class Fiber {
+    public:
+        using FuncType = std::function<void (Fiber& fiber)>;
+
+    private:
         Fiber(const Fiber &) = delete;
         Fiber& operator =(const Fiber &) = delete;
-
-        using FuncType = std::function<void (Fiber& fiber)>;
 
         /// \brief 存储子纤程抛出的异常
         std::exception_ptr eptr = nullptr;
