@@ -8,3 +8,5 @@ benchmark/pingpang_libaco
 a.out
 createalot_sjlj
 pingpang_sjlj
+*.o
+*.a

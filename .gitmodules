@@ -1,3 +1,3 @@
 [submodule "libaco"]
-	path = libaco
-url=https://github.com/hnes/libaco.git
+path=libaco
+url=https://gitee.com/carterl/libaco.git

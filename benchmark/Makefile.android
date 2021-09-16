@@ -2,16 +2,16 @@ benchmark: pingpang createalot
 	echo FINISHED
 
 pingpang:
-	$(CXX) pingpang.cpp -std=c++17 -DNDEBUG=1 -O3 -o pingpang_fcontext -DUSE_FCONTEXT=1 -lboost_context
-	$(CXX) pingpang.cpp -std=c++17 -DNDEBUG=1 -O3 -o pingpang_native -DUSE_FCONTEXT=0
+	$(CXX) $(CXXFLAGS) pingpang.cpp -std=c++17 -flto -DNDEBUG=1 -O3 -o pingpang_fcontext -DUSE_FCONTEXT=1 -lboost_context
+	$(CXX) $(CXXFLAGS) pingpang.cpp libaco.a -std=c++17 -flto -DNDEBUG=1 -O3 -o pingpang_libaco -DUSE_FCONTEXT=0 -DUSE_LIBACO=1
 	time ./pingpang_fcontext
-	time ./pingpang_native
+	time ./pingpang_libaco
 
 createalot:
-	$(CXX) createalot.cpp -std=c++17 -DNDEBUG=1 -O3 -o createalot_fcontext -DUSE_FCONTEXT=1 -lboost_context
-	$(CXX) createalot.cpp -std=c++17 -DNDEBUG=1 -O3 -o createalot_native -DUSE_FCONTEXT=0
+	$(CXX) $(CXXFLAGS) createalot.cpp -std=c++17 -flto -DNDEBUG=1 -O3 -o createalot_fcontext -DUSE_FCONTEXT=1 -lboost_context
+	$(CXX) $(CXXFLAGS) pingpang.cpp libaco.a -std=c++17 -flto -DNDEBUG=1 -O3 -o pingpang_libaco -DUSE_FCONTEXT=0 -DUSE_LIBACO=1
 	time ./createalot_fcontext
-	time ./createalot_native
+	time ./createalot_libaco
 
 clean:
-	rm -f pingpang_fcontext pingpang_native createalot_fcontext createalot_native
+	rm -f pingpang_fcontext pingpang_libaco createalot_fcontext createalot_libaco
