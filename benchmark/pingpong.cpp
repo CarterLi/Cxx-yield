@@ -16,7 +16,7 @@ using namespace FiberSpace;
 
 int pingCount, pangCount;
 
-void pang(Fiber<int> &fiber) {
+void pang(Fiber<int, true> &fiber) noexcept {
     int value;
     while ((value = *fiber.current()) < TIMES) {
         ++pangCount;
@@ -25,8 +25,8 @@ void pang(Fiber<int> &fiber) {
 }
 
 NOINLINE
-void ping() {
-    Fiber<int> fiber(pang);
+void ping() noexcept {
+    Fiber<int, true> fiber(pang);
 
     ++pingCount;
     fiber.next(0);

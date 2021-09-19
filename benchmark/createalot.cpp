@@ -16,15 +16,15 @@ using namespace FiberSpace;
 
 int enterCount;
 
-void fn(Fiber<int> &fiber) {
+void fn(Fiber<int, true> &fiber) noexcept {
     ++enterCount;
 }
 
 NOINLINE
-void test() {
+void test() noexcept {
     int count = TIMES;
     while (count --> 0) {
-        Fiber<int> fiber(fn);
+        Fiber<int, true> fiber(fn);
         fiber.next();
     }
 }
